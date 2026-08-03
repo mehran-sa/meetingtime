@@ -3,6 +3,8 @@
 const BRAND_CONFIG = Array.isArray(window.BRAND_CONFIG) ? window.BRAND_CONFIG : [];
 const BRANDS = BRAND_CONFIG.map((item) => String(item.brand || "").trim()).filter(Boolean);
 const STORAGE_KEY = "slack-message-generator-representatives-v1";
+const PADDLE_OCR_MODULE_URL = "https://cdn.jsdelivr.net/npm/@paddleocr/paddleocr-js@0.4.2/+esm";
+const ONNX_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_LOOKUP = {
   jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
@@ -19,6 +21,9 @@ let toastTimer = null;
 let isOcrRunning = false;
 let ocrWorker = null;
 let ocrWorkerPromise = null;
+let paddleOcr = null;
+let paddleOcrPromise = null;
+let paddleOcrUnavailable = false;
 
 window.addEventListener("DOMContentLoaded", init);
 
@@ -283,33 +288,325 @@ async function handleImageFile(file) {
 
 async function runOcr() {
   if (!currentImage || isOcrRunning) return;
-  if (!window.Tesseract) {
-    showToast("OCR could not load. Check the internet connection and refresh.");
-    return;
-  }
 
   isOcrRunning = true;
   elements.runOcrBtn.disabled = true;
   elements.ocrStatus.hidden = false;
   elements.extractionResult.hidden = true;
-  setOcrProgress(0, "Starting OCR…");
+  setOcrProgress(0, "Preparing screenshot…");
 
   try {
-    const worker = await getOcrWorker();
-    const result = await worker.recognize(currentImage);
-    const text = cleanText(result.data.text || "");
+    const prepared = await prepareOcrImages(currentImage);
+    const candidates = [];
+    let engineLabel = "Enhanced OCR";
+
+    try {
+      setOcrProgress(8, "Loading enhanced OCR model…");
+      const paddleText = await recognizeWithPaddleOcr(prepared.color);
+      if (paddleText) candidates.push({ engine: "PaddleOCR", text: paddleText });
+    } catch (error) {
+      paddleOcrUnavailable = true;
+      console.warn("Enhanced PaddleOCR was unavailable; using fallback OCR.", error);
+      engineLabel = "Fallback OCR";
+    }
+
+    const paddleBest = selectBestOcrCandidate(candidates);
+    if (!paddleBest || scoreOcrText(paddleBest.text) < 15) {
+      setOcrProgress(58, paddleBest ? "Checking missed details…" : "Reading screenshot with fallback OCR…");
+      const fallbackTexts = await recognizeWithTesseract(prepared);
+      fallbackTexts.forEach((text, index) => {
+        if (text) candidates.push({ engine: index === 0 ? "Tesseract enhanced" : "Tesseract high contrast", text });
+      });
+      if (paddleBest && fallbackTexts.some(Boolean)) engineLabel = "Enhanced OCR + verification";
+    }
+
+    const best = selectBestOcrCandidate(candidates);
+    if (!best?.text) throw new Error("No text was recognized.");
+
+    const text = cleanText(buildOcrConsensusText(candidates, best));
     elements.extractedText.value = text;
-    setOcrProgress(100, "Meeting details extracted");
+    setOcrProgress(100, `${engineLabel} complete`);
     extractAndApplyDetails(text, false);
-    window.setTimeout(() => { elements.ocrStatus.hidden = true; }, 1200);
+    elements.extractionResult.dataset.engine = best.engine;
+    window.setTimeout(() => { elements.ocrStatus.hidden = true; }, 1400);
   } catch (error) {
     console.error(error);
     setOcrProgress(0, "OCR failed");
-    showToast("OCR failed. Try a clearer screenshot or paste the text manually.");
+    showToast("OCR could not read the screenshot. Try a tighter crop or paste the text manually.");
   } finally {
     isOcrRunning = false;
     elements.runOcrBtn.disabled = !currentImage;
   }
+}
+
+async function recognizeWithPaddleOcr(imageCanvas) {
+  const ocr = await getPaddleOcr();
+  setOcrProgress(28, "Detecting text regions…");
+  const [result] = await ocr.predict(imageCanvas, {
+    textDetLimitSideLen: 1920,
+    textDetLimitType: "max",
+    textDetMaxSideLimit: 3200,
+    textDetThresh: 0.25,
+    textDetBoxThresh: 0.45,
+    textDetUnclipRatio: 1.6,
+    textRecScoreThresh: 0.25
+  });
+  setOcrProgress(54, "Recognising meeting details…");
+  return formatPaddleOcrItems(result?.items || []);
+}
+
+async function getPaddleOcr() {
+  if (paddleOcr) return paddleOcr;
+  if (paddleOcrUnavailable) throw new Error("PaddleOCR is disabled for this session.");
+  if (!paddleOcrPromise) {
+    paddleOcrPromise = import(PADDLE_OCR_MODULE_URL)
+      .then(({ PaddleOCR }) => PaddleOCR.create({
+        lang: "en",
+        ocrVersion: "PP-OCRv6",
+        ortOptions: {
+          backend: "wasm",
+          wasmPaths: ONNX_WASM_PATH,
+          numThreads: 1,
+          simd: true
+        }
+      }))
+      .then((instance) => {
+        paddleOcr = instance;
+        return instance;
+      })
+      .catch((error) => {
+        paddleOcrPromise = null;
+        throw error;
+      });
+  }
+  return paddleOcrPromise;
+}
+
+function formatPaddleOcrItems(items) {
+  const positioned = items
+    .filter((item) => cleanText(item?.text || "") && Number(item?.score ?? 1) >= 0.22)
+    .map((item) => {
+      const points = Array.isArray(item.poly) ? item.poly : [];
+      const xs = points.map((point) => Number(point?.[0])).filter(Number.isFinite);
+      const ys = points.map((point) => Number(point?.[1])).filter(Number.isFinite);
+      const x = xs.length ? Math.min(...xs) : 0;
+      const y = ys.length ? Math.min(...ys) : 0;
+      const height = ys.length ? Math.max(8, Math.max(...ys) - Math.min(...ys)) : 16;
+      return { text: cleanText(item.text), x, y, centerY: y + height / 2, height };
+    })
+    .sort((a, b) => a.centerY - b.centerY || a.x - b.x);
+
+  const rows = [];
+  positioned.forEach((item) => {
+    const row = rows.find((candidate) => Math.abs(candidate.centerY - item.centerY) <= Math.max(candidate.height, item.height) * 0.55);
+    if (row) {
+      row.items.push(item);
+      row.centerY = (row.centerY * (row.items.length - 1) + item.centerY) / row.items.length;
+      row.height = Math.max(row.height, item.height);
+    } else {
+      rows.push({ centerY: item.centerY, height: item.height, items: [item] });
+    }
+  });
+
+  return rows
+    .sort((a, b) => a.centerY - b.centerY)
+    .map((row) => row.items.sort((a, b) => a.x - b.x).map((item) => item.text).join(" "))
+    .join("\n");
+}
+
+async function recognizeWithTesseract(prepared) {
+  if (!window.Tesseract) throw new Error("Tesseract fallback could not load.");
+  const worker = await getOcrWorker();
+  const outputs = [];
+
+  await worker.setParameters({
+    tessedit_pageseg_mode: "3",
+    preserve_interword_spaces: "1",
+    user_defined_dpi: "300"
+  });
+  const enhanced = await worker.recognize(prepared.enhanced);
+  outputs.push(cleanText(enhanced.data.text || ""));
+
+  if (scoreOcrText(outputs[0]) < 15) {
+    setOcrProgress(82, "Running high-contrast verification…");
+    await worker.setParameters({
+      tessedit_pageseg_mode: "6",
+      preserve_interword_spaces: "1",
+      user_defined_dpi: "300"
+    });
+    const highContrast = await worker.recognize(prepared.binary);
+    outputs.push(cleanText(highContrast.data.text || ""));
+  }
+  return outputs;
+}
+
+async function prepareOcrImages(file) {
+  const source = await loadImageSource(file);
+  const width = source.width || source.naturalWidth;
+  const height = source.height || source.naturalHeight;
+  const desiredScale = Math.min(3, Math.max(1, 2200 / Math.max(1, width)));
+  const maximumScale = 4200 / Math.max(1, width, height);
+  const scale = Math.min(desiredScale, maximumScale);
+  const outputWidth = Math.max(1, Math.round(width * scale));
+  const outputHeight = Math.max(1, Math.round(height * scale));
+
+  const color = document.createElement("canvas");
+  color.width = outputWidth;
+  color.height = outputHeight;
+  const colorContext = color.getContext("2d", { willReadFrequently: true });
+  colorContext.imageSmoothingEnabled = true;
+  colorContext.imageSmoothingQuality = "high";
+  colorContext.drawImage(source, 0, 0, outputWidth, outputHeight);
+
+  const enhanced = cloneCanvas(color);
+  enhanceCanvasForText(enhanced, false);
+  const binary = cloneCanvas(color);
+  enhanceCanvasForText(binary, true);
+  if (typeof source.close === "function") source.close();
+  return { color, enhanced, binary };
+}
+
+async function loadImageSource(file) {
+  if (typeof createImageBitmap === "function") return createImageBitmap(file);
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("The screenshot could not be decoded."));
+    };
+    image.src = url;
+  });
+}
+
+function cloneCanvas(source) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  canvas.getContext("2d").drawImage(source, 0, 0);
+  return canvas;
+}
+
+function enhanceCanvasForText(canvas, makeBinary) {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  const pixels = image.data;
+  const luminance = new Uint8Array(pixels.length / 4);
+  const histogram = new Uint32Array(256);
+
+  for (let index = 0, pixel = 0; index < pixels.length; index += 4, pixel += 1) {
+    const gray = Math.round(0.299 * pixels[index] + 0.587 * pixels[index + 1] + 0.114 * pixels[index + 2]);
+    luminance[pixel] = gray;
+    histogram[gray] += 1;
+  }
+
+  const low = histogramPercentile(histogram, luminance.length, 0.02);
+  const high = histogramPercentile(histogram, luminance.length, 0.98);
+  const threshold = makeBinary ? otsuThreshold(histogram, luminance.length) : 0;
+  const range = Math.max(24, high - low);
+
+  for (let index = 0, pixel = 0; index < pixels.length; index += 4, pixel += 1) {
+    let value = Math.max(0, Math.min(255, Math.round(((luminance[pixel] - low) * 255) / range)));
+    if (makeBinary) value = luminance[pixel] > threshold ? 255 : 0;
+    else value = Math.max(0, Math.min(255, Math.round((value - 128) * 1.18 + 128)));
+    pixels[index] = value;
+    pixels[index + 1] = value;
+    pixels[index + 2] = value;
+    pixels[index + 3] = 255;
+  }
+  context.putImageData(image, 0, 0);
+}
+
+function histogramPercentile(histogram, total, percentile) {
+  const target = total * percentile;
+  let count = 0;
+  for (let value = 0; value < histogram.length; value += 1) {
+    count += histogram[value];
+    if (count >= target) return value;
+  }
+  return 255;
+}
+
+function otsuThreshold(histogram, total) {
+  let sum = 0;
+  for (let value = 0; value < 256; value += 1) sum += value * histogram[value];
+  let backgroundWeight = 0;
+  let backgroundSum = 0;
+  let maximumVariance = -1;
+  let threshold = 127;
+  for (let value = 0; value < 256; value += 1) {
+    backgroundWeight += histogram[value];
+    if (!backgroundWeight) continue;
+    const foregroundWeight = total - backgroundWeight;
+    if (!foregroundWeight) break;
+    backgroundSum += value * histogram[value];
+    const backgroundMean = backgroundSum / backgroundWeight;
+    const foregroundMean = (sum - backgroundSum) / foregroundWeight;
+    const variance = backgroundWeight * foregroundWeight * (backgroundMean - foregroundMean) ** 2;
+    if (variance > maximumVariance) {
+      maximumVariance = variance;
+      threshold = value;
+    }
+  }
+  return threshold;
+}
+
+function scoreOcrText(text) {
+  if (!text) return 0;
+  const details = extractReminderDetails(text);
+  let score = 0;
+  if (details.meetingLink) score += /meet\.google\.com\/[a-z0-9]{3,}(?:-[a-z0-9]{2,})?/i.test(details.meetingLink) ? 7 : 5;
+  if (details.date) score += 4;
+  if (details.time) score += 4;
+  if (details.endTime) score += 2;
+  if (details.timezone) score += 2;
+  if (details.email) score += 1;
+  if (details.brand) score += 1;
+  if (details.partnerBrand) score += 1;
+  score += Math.min(2, Math.floor(cleanText(text).length / 150));
+  return score;
+}
+
+function selectBestOcrCandidate(candidates) {
+  return [...candidates]
+    .filter((candidate) => cleanText(candidate?.text || ""))
+    .sort((a, b) => scoreOcrText(b.text) - scoreOcrText(a.text) || b.text.length - a.text.length)[0] || null;
+}
+
+function buildOcrConsensusText(candidates, bestCandidate) {
+  const baseText = cleanText(bestCandidate?.text || "");
+  const baseDetails = extractReminderDetails(baseText);
+  const consensus = { ...baseDetails };
+  const sorted = [...candidates].sort((a, b) => scoreOcrText(b.text) - scoreOcrText(a.text));
+
+  sorted.forEach((candidate) => {
+    const details = extractReminderDetails(candidate.text);
+    Object.keys(consensus).forEach((key) => {
+      if (!consensus[key] && details[key]) consensus[key] = details[key];
+    });
+  });
+
+  const supplemental = [];
+  if (!baseDetails.brand && consensus.brand) supplemental.push(`Brand: ${consensus.brand}`);
+  if (!baseDetails.partnerBrand && consensus.partnerBrand) supplemental.push(`Meeting with: ${consensus.partnerBrand}`);
+  if (!baseDetails.email && consensus.email) supplemental.push(consensus.email);
+  if (!baseDetails.meetingLink && consensus.meetingLink) supplemental.push("Meeting link", consensus.meetingLink);
+  if ((!baseDetails.date || !baseDetails.time || !baseDetails.timezone) && consensus.date && consensus.time) {
+    const timezoneLabel = consensus.timezone === "Europe/London" ? "United Kingdom Time" : "Bangladesh Standard Time";
+    supplemental.push("When", `${consensus.date} - ${formatTimeForOcrConsensus(consensus.time)}${consensus.endTime ? ` ~ ${formatTimeForOcrConsensus(consensus.endTime)}` : ""} (${timezoneLabel})`);
+  }
+  return supplemental.length ? `${baseText}\n\nOCR verification\n${supplemental.join("\n")}` : baseText;
+}
+
+function formatTimeForOcrConsensus(value) {
+  const match = /^(\d{2}):(\d{2})$/.exec(value || "");
+  if (!match) return value;
+  const hour = Number(match[1]);
+  return `${hour % 12 || 12}:${match[2]}${hour >= 12 ? "pm" : "am"}`;
 }
 
 async function getOcrWorker() {
@@ -319,13 +616,14 @@ async function getOcrWorker() {
       logger: (message) => {
         if (typeof message.progress !== "number" || !isOcrRunning) return;
         const labels = {
-          "loading tesseract core": "Loading OCR engine…",
-          "initializing tesseract": "Initialising OCR…",
+          "loading tesseract core": "Loading fallback OCR engine…",
+          "initializing tesseract": "Initialising fallback OCR…",
           "loading language traineddata": "Loading English recognition data…",
-          "initializing api": "Preparing recognition…",
-          "recognizing text": "Reading meeting screenshot…"
+          "initializing api": "Preparing fallback recognition…",
+          "recognizing text": "Verifying screenshot text…"
         };
-        setOcrProgress(Math.round(message.progress * 100), labels[message.status] || "Processing screenshot…");
+        const scaledProgress = 58 + Math.round(message.progress * 34);
+        setOcrProgress(scaledProgress, labels[message.status] || "Verifying screenshot…");
       }
     }).then((worker) => {
       ocrWorker = worker;
@@ -500,8 +798,13 @@ function repairOcrUrlText(text) {
   let value = String(text || "")
     .replace(/h\s*t\s*t\s*p\s*s?\s*:\s*\/\s*\//gi, (match) => match.toLowerCase().includes("s") ? "https://" : "http://")
     .replace(/w\s*w\s*w\s*\.\s*/gi, "www.")
-    .replace(/[ \t]*([./:?=&_%#-])[ \t]*/g, "$1");
+    .replace(/\bmeet\s*[.,]?\s*goog(?:l|1|i)e\s*[.,]?\s*co(?:m|rn)\b/gi, "meet.google.com")
+    .replace(/\bmeet[.,]\s*google[.,]\s*com\b/gi, "meet.google.com")
+    .replace(/\bmeet\.goog(?:1|i)e\.co(?:rn|m)\b/gi, "meet.google.com")
+    .replace(/\bmeet\.google\.com\s*[\\|]\s*/gi, "meet.google.com/")
+    .replace(/\bmeet\.google\.com\s*\/\s*/gi, "meet.google.com/");
 
+  value = value.replace(/(meet\.google\.com\/)([a-z0-9]{2,4})\s*[-–—~_]\s*([a-z0-9]{2,5})\s*[-–—~_]\s*([a-z0-9]{2,4})/gi, "$1$2-$3-$4");
   value = value.replace(/(https?:\/\/[^\s\n]+)\n([A-Za-z0-9_%#?=&./-]{3,})/g, (full, base, continuation) =>
     /[-/?=&_%#]/.test(continuation) ? `${base}${continuation}` : full);
   value = value.replace(/((?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|(?:[a-z0-9-]+\.)?join\.gong\.io|gong\.io|(?:[a-z0-9-]+\.)?webex\.com|gotomeet\.me|whereby\.com)\/?[^\s\n]*)\n([A-Za-z0-9_%#?=&./-]{3,})/gi, (full, base, continuation) =>
@@ -912,5 +1215,8 @@ window.ReminderGeneratorTest = {
   extractTimezone,
   extractMeetingLink,
   zonedLocalToUtc,
-  formatDateTimeInZone
+  formatDateTimeInZone,
+  repairOcrUrlText,
+  scoreOcrText,
+  formatPaddleOcrItems
 };

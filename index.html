@@ -4,7 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="Create Bangladesh-time Slack meeting reminders from screenshots." />
+  <meta name="theme-color" content="#5b4cf0" />
   <title>Slack Reminder Generator</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <link rel="stylesheet" href="styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/tesseract.min.js" defer></script>
@@ -35,7 +39,8 @@
         <button id="clearImageBtn" class="text-btn" type="button" disabled>Clear</button>
       </div>
 
-      <p class="section-help">Upload, drop, or paste the screenshot. OCR will try to fetch the meeting link, email, date, time, time zone, brand, and labelled partner brand.</p>
+      <p class="section-help">Upload, drop, or paste the screenshot. OCR will try to fetch the meeting link, email, date, start time, end time, time zone, brand, and labelled partner brand.</p>
+      <div class="ocr-engine-note"><strong>Enhanced OCR:</strong> PaddleOCR is used first, with high-resolution Tesseract verification when details are missing. The first scan may take longer while the recognition model loads.</div>
 
       <div id="dropZone" class="drop-zone" tabindex="0" role="button" aria-label="Upload or paste a meeting screenshot">
         <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" hidden />
@@ -180,7 +185,7 @@
   </main>
 
   <footer>
-    <p>OCR runs in the browser. Screenshots are not uploaded to a custom server.</p>
+    <p>OCR runs in the browser using PaddleOCR with a Tesseract fallback. Screenshots are not uploaded to a custom server.</p>
   </footer>
 
   <dialog id="settingsDialog" class="settings-dialog">

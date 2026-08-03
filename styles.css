@@ -358,3 +358,15 @@ footer { padding: 4px 20px 32px; color: var(--muted); text-align: center; font-s
   line-height: 1.45;
   text-align: right;
 }
+
+.ocr-engine-note {
+  margin-top: 12px;
+  padding: 11px 13px;
+  color: #4d5470;
+  background: #f8f7ff;
+  border: 1px solid #dedaff;
+  border-radius: 11px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ocr-engine-note strong { color: var(--primary-dark); }
