@@ -21,7 +21,6 @@
       </div>
     </div>
     <div class="topbar-actions">
-      <button id="openSlackSettingsBtn" class="btn btn-secondary" type="button">Slack Settings</button>
       <button id="openSettingsBtn" class="btn btn-secondary" type="button">Representative Settings</button>
     </div>
   </header>
@@ -123,8 +122,13 @@
         </div>
 
         <div class="field-group">
-          <label for="sourceTime">Screenshot meeting time</label>
+          <label for="sourceTime">Screenshot start time</label>
           <input id="sourceTime" type="time" />
+        </div>
+
+        <div class="field-group">
+          <label for="sourceEndTime">Screenshot end time</label>
+          <input id="sourceEndTime" type="time" />
         </div>
 
         <div class="field-group full-width">
@@ -164,12 +168,13 @@
           <div class="output-actions">
             <button id="resetBtn" class="text-btn" type="button">Reset</button>
             <button id="copyBtn" class="btn btn-secondary btn-small" type="button" disabled>Copy message</button>
-            <button id="sendSlackBtn" class="btn btn-slack btn-small" type="button" disabled>Send to Slack</button>
+            <button id="shareSlackBtn" class="btn btn-slack btn-small" type="button" disabled>Share to Slack</button>
           </div>
         </div>
         <textarea id="outputMessage" rows="14" placeholder="Your reminder message will appear here."></textarea>
         <div id="copyFeedback" class="copy-feedback" aria-live="polite"></div>
-        <div id="slackFeedback" class="slack-feedback" aria-live="polite"></div>
+        <div id="shareFeedback" class="slack-feedback" aria-live="polite"></div>
+        <small class="share-help">Supported phones and desktops open the system share menu. Otherwise, the app copies the message and opens Slack for pasting.</small>
       </div>
     </section>
   </main>
@@ -215,41 +220,6 @@
     </form>
   </dialog>
 
-
-  <dialog id="slackDialog" class="settings-dialog slack-dialog">
-    <form method="dialog" class="dialog-card" id="slackForm">
-      <div class="dialog-heading">
-        <div>
-          <h2>Slack connection</h2>
-          <p>Connect the reminder generator to one Slack channel using an Incoming Webhook.</p>
-        </div>
-        <button id="closeSlackDialogBtn" class="icon-btn" type="button" aria-label="Close Slack settings">×</button>
-      </div>
-
-      <div class="settings-help">
-        Create an Incoming Webhook in Slack and paste its URL below. The URL is a secret and is never added to the GitHub repository.
-      </div>
-
-      <div class="field-group">
-        <label for="slackWebhookInput">Slack Incoming Webhook URL</label>
-        <input id="slackWebhookInput" type="password" inputmode="url" autocomplete="off" placeholder="https://hooks.slack.com/services/..." />
-        <small class="field-help">The message will be posted to the channel selected when the webhook was created.</small>
-      </div>
-
-      <label class="checkbox-row" for="rememberSlackWebhook">
-        <input id="rememberSlackWebhook" type="checkbox" />
-        <span>Remember this webhook in this browser</span>
-      </label>
-
-      <div class="dialog-actions">
-        <button id="clearSlackWebhookBtn" class="btn btn-danger-secondary" type="button">Remove connection</button>
-        <div>
-          <button id="cancelSlackDialogBtn" class="btn btn-secondary" type="button">Cancel</button>
-          <button id="saveSlackWebhookBtn" class="btn btn-primary" type="submit">Save Slack connection</button>
-        </div>
-      </div>
-    </form>
-  </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>

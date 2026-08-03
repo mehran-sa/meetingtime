@@ -3,7 +3,6 @@
 const BRAND_CONFIG = Array.isArray(window.BRAND_CONFIG) ? window.BRAND_CONFIG : [];
 const BRANDS = BRAND_CONFIG.map((item) => String(item.brand || "").trim()).filter(Boolean);
 const STORAGE_KEY = "slack-message-generator-representatives-v1";
-const SLACK_STORAGE_KEY = "slack-reminder-generator-webhook-v1";
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_LOOKUP = {
   jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
@@ -20,7 +19,6 @@ let toastTimer = null;
 let isOcrRunning = false;
 let ocrWorker = null;
 let ocrWorkerPromise = null;
-let slackWebhookUrl = loadSlackWebhook();
 
 window.addEventListener("DOMContentLoaded", init);
 
@@ -32,6 +30,7 @@ function init() {
   updateRepresentativeCard();
   updateConversionPreview();
   updateCopyState();
+  updateShareButtonLabel();
 }
 
 function cacheElements() {
@@ -41,11 +40,9 @@ function cacheElements() {
     "replaceImageBtn", "clearImageBtn", "emptyDropState", "imageState", "previewImage", "imageName",
     "ocrStatus", "ocrStatusText", "ocrPercent", "progressBar", "extractionResult", "runOcrBtn",
     "fetchDetailsBtn", "extractedText", "brandSelect", "representativeName", "representativeMention",
-    "editCurrentRepBtn", "partnerBrandInput", "emailInput", "sourceDate", "sourceTime", "sourceTimezone", "conversionCard",
+    "editCurrentRepBtn", "partnerBrandInput", "emailInput", "sourceDate", "sourceTime", "sourceEndTime", "sourceTimezone", "conversionCard",
     "convertedDateTime", "conversionNote", "meetingLinkInput", "additionalNote", "generateBtn",
-    "outputMessage", "copyBtn", "copyFeedback", "sendSlackBtn", "slackFeedback", "resetBtn", "toast",
-    "openSlackSettingsBtn", "slackDialog", "slackForm", "closeSlackDialogBtn", "cancelSlackDialogBtn",
-    "clearSlackWebhookBtn", "slackWebhookInput", "rememberSlackWebhook", "saveSlackWebhookBtn"
+    "outputMessage", "copyBtn", "copyFeedback", "shareSlackBtn", "shareFeedback", "resetBtn", "toast"
   ].forEach((id) => { elements[id] = document.getElementById(id); });
 }
 
@@ -102,7 +99,7 @@ function bindEvents() {
 
   elements.brandSelect.addEventListener("change", updateRepresentativeCard);
   elements.editCurrentRepBtn.addEventListener("click", () => openSettings(elements.brandSelect.value));
-  [elements.sourceDate, elements.sourceTime, elements.sourceTimezone].forEach((element) => {
+  [elements.sourceDate, elements.sourceTime, elements.sourceEndTime, elements.sourceTimezone].forEach((element) => {
     element.addEventListener("input", updateConversionPreview);
     element.addEventListener("change", updateConversionPreview);
   });
@@ -110,18 +107,9 @@ function bindEvents() {
   elements.generateBtn.addEventListener("click", generateReminder);
   elements.outputMessage.addEventListener("input", updateCopyState);
   elements.copyBtn.addEventListener("click", copyOutput);
-  elements.sendSlackBtn.addEventListener("click", sendToSlack);
+  elements.shareSlackBtn.addEventListener("click", shareToSlack);
   elements.resetBtn.addEventListener("click", resetForm);
 
-  elements.openSlackSettingsBtn.addEventListener("click", openSlackSettings);
-  elements.closeSlackDialogBtn.addEventListener("click", closeSlackSettings);
-  elements.cancelSlackDialogBtn.addEventListener("click", closeSlackSettings);
-  elements.clearSlackWebhookBtn.addEventListener("click", clearSlackConnection);
-  elements.slackForm.addEventListener("submit", saveSlackSettings);
-  elements.slackDialog.addEventListener("cancel", (event) => {
-    event.preventDefault();
-    closeSlackSettings();
-  });
 
   elements.openSettingsBtn.addEventListener("click", () => openSettings());
   elements.closeSettingsBtn.addEventListener("click", closeSettingsWithoutSaving);
@@ -132,60 +120,6 @@ function bindEvents() {
     event.preventDefault();
     closeSettingsWithoutSaving();
   });
-}
-
-function loadSlackWebhook() {
-  try {
-    return String(localStorage.getItem(SLACK_STORAGE_KEY) || "").trim();
-  } catch (error) {
-    console.warn("Could not load Slack webhook settings.", error);
-    return "";
-  }
-}
-
-function isValidSlackWebhook(value) {
-  return /^https:\/\/hooks\.slack(?:-gov)?\.com\/services\/[A-Za-z0-9/_-]+$/i.test(String(value || "").trim());
-}
-
-function openSlackSettings() {
-  elements.slackWebhookInput.value = slackWebhookUrl;
-  elements.rememberSlackWebhook.checked = Boolean(localStorage.getItem(SLACK_STORAGE_KEY));
-  elements.slackDialog.showModal();
-  requestAnimationFrame(() => elements.slackWebhookInput.focus());
-}
-
-function closeSlackSettings() {
-  elements.slackDialog.close();
-}
-
-function saveSlackSettings(event) {
-  event.preventDefault();
-  const value = elements.slackWebhookInput.value.trim();
-  if (!isValidSlackWebhook(value)) {
-    elements.slackWebhookInput.focus();
-    showToast("Add a valid Slack Incoming Webhook URL.");
-    return;
-  }
-
-  slackWebhookUrl = value;
-  try {
-    if (elements.rememberSlackWebhook.checked) localStorage.setItem(SLACK_STORAGE_KEY, value);
-    else localStorage.removeItem(SLACK_STORAGE_KEY);
-  } catch (error) {
-    console.warn("Could not save Slack webhook settings.", error);
-  }
-  elements.slackDialog.close();
-  showToast("Slack connection saved.");
-}
-
-function clearSlackConnection() {
-  slackWebhookUrl = "";
-  elements.slackWebhookInput.value = "";
-  elements.rememberSlackWebhook.checked = false;
-  try { localStorage.removeItem(SLACK_STORAGE_KEY); } catch (error) { console.warn(error); }
-  elements.slackDialog.close();
-  elements.slackFeedback.textContent = "";
-  showToast("Slack connection removed.");
 }
 
 function populateBrands() {
@@ -452,7 +386,11 @@ function extractAndApplyDetails(text, manualRun) {
   }
   if (details.time) {
     elements.sourceTime.value = details.time;
-    found.push("time");
+    found.push("start time");
+  }
+  if (details.endTime) {
+    elements.sourceEndTime.value = details.endTime;
+    found.push("end time");
   }
   if (details.timezone) {
     elements.sourceTimezone.value = details.timezone;
@@ -465,7 +403,7 @@ function extractAndApplyDetails(text, manualRun) {
 
   updateConversionPreview();
   const missing = [
-    [details.email, "email"], [details.date, "date"], [details.time, "time"], [details.meetingLink, "meeting link"]
+    [details.email, "email"], [details.date, "date"], [details.time, "start time"], [details.meetingLink, "meeting link"]
   ].filter(([value]) => !value).map(([, label]) => label);
 
   elements.extractionResult.hidden = false;
@@ -481,12 +419,14 @@ function extractAndApplyDetails(text, manualRun) {
 }
 
 function extractReminderDetails(text) {
+  const timeRange = extractTimeRange(text);
   return {
     brand: extractBrand(text),
     partnerBrand: extractPartnerBrand(text),
     email: extractEmail(text),
     date: extractDate(text),
-    time: extractTime(text),
+    time: timeRange.startTime,
+    endTime: timeRange.endTime,
     timezone: extractTimezone(text),
     meetingLink: extractMeetingLink(text)
   };
@@ -529,26 +469,43 @@ function extractTimezone(text) {
 
 function extractMeetingLink(text) {
   const repaired = repairOcrUrlText(text);
+  const lines = repaired.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!/^meeting\s*link\s*[:\-]?$/i.test(lines[index])) continue;
+    const nextLine = lines[index + 1] || "";
+    const labelledCandidate = extractMeetingUrlCandidate(nextLine);
+    if (labelledCandidate) return labelledCandidate;
+  }
+
   const direct = repaired.match(/https?:\/\/[^\s<>"'`]+/gi) || [];
   const www = repaired.match(/\bwww\.[^\s<>"'`]+/gi) || [];
-  const candidates = [...direct, ...www.map((url) => `https://${url}`)]
+  const bareDomains = repaired.match(/\b(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|(?:[a-z0-9-]+\.)?join\.gong\.io|gong\.io|(?:[a-z0-9-]+\.)?webex\.com|gotomeet\.me|whereby\.com)(?:\/[^\s<>"'`]*)?/gi) || [];
+  const candidates = [...direct, ...www.map((url) => `https://${url}`), ...bareDomains.map((url) => `https://${url}`)]
     .map(cleanUrlCandidate)
     .filter(Boolean);
 
   const unique = [...new Set(candidates)];
   if (!unique.length) return "";
-  const meetingDomains = /(zoom\.us|meet\.google\.com|teams\.microsoft\.com|join\.gong\.io|gong\.io|webex\.com|gotomeet\.me|whereby\.com|calendly\.com)/i;
+  const meetingDomains = /(zoom\.us|meet\.google\.com|teams\.microsoft\.com|join\.gong\.io|gong\.io|webex\.com|gotomeet\.me|whereby\.com)/i;
   return unique.find((url) => meetingDomains.test(url)) || unique.sort((a, b) => b.length - a.length)[0];
+}
+
+function extractMeetingUrlCandidate(value) {
+  const match = String(value || "").match(/(?:https?:\/\/)?(?:www\.)?(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|(?:[a-z0-9-]+\.)?join\.gong\.io|gong\.io|(?:[a-z0-9-]+\.)?webex\.com|gotomeet\.me|whereby\.com)(?:\/[^\s<>"'`]*)?/i);
+  return match ? cleanUrlCandidate(match[0]) : "";
 }
 
 function repairOcrUrlText(text) {
   let value = String(text || "")
     .replace(/h\s*t\s*t\s*p\s*s?\s*:\s*\/\s*\//gi, (match) => match.toLowerCase().includes("s") ? "https://" : "http://")
     .replace(/w\s*w\s*w\s*\.\s*/gi, "www.")
-    .replace(/\s*([./:?=&_%#-])\s*/g, "$1");
+    .replace(/[ \t]*([./:?=&_%#-])[ \t]*/g, "$1");
 
-  // Join a wrapped URL only when the next line starts like a URL continuation.
-  value = value.replace(/(https?:\/\/[^\s\n]+)\n([A-Za-z0-9_%#?=&./-]{4,})/g, "$1$2");
+  value = value.replace(/(https?:\/\/[^\s\n]+)\n([A-Za-z0-9_%#?=&./-]{3,})/g, (full, base, continuation) =>
+    /[-/?=&_%#]/.test(continuation) ? `${base}${continuation}` : full);
+  value = value.replace(/((?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|(?:[a-z0-9-]+\.)?join\.gong\.io|gong\.io|(?:[a-z0-9-]+\.)?webex\.com|gotomeet\.me|whereby\.com)\/?[^\s\n]*)\n([A-Za-z0-9_%#?=&./-]{3,})/gi, (full, base, continuation) =>
+    /[-/?=&_%#]/.test(continuation) ? `${base}${continuation}` : full);
   return value;
 }
 
@@ -579,25 +536,48 @@ function extractDate(text) {
   return "";
 }
 
-function extractTime(text) {
-  const normalized = String(text || "")
+function extractTimeRange(text) {
+  const normalized = normalizeTimeText(text);
+  const lines = normalized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  let candidate = "";
+
+  const whenIndex = lines.findIndex((line) => /^when\s*[:\-]?$/i.test(line));
+  if (whenIndex >= 0) candidate = lines.slice(whenIndex + 1, whenIndex + 4).join(" ");
+  if (!candidate) {
+    candidate = lines.find((line) => /(?:~|–|—|\bto\b)/i.test(line) && containsTimeToken(line)) || "";
+  }
+  if (!candidate) candidate = normalized;
+
+  const tokens = candidate.match(/\b(?:1[0-2]|0?[1-9])(?:\s*:\s*[0-5]\d)?\s*(?:AM|PM)\b|\b(?:[01]?\d|2[0-3])\s*:\s*[0-5]\d\b/gi) || [];
+  const parsed = tokens.map(parseTimeToken).filter(Boolean);
+  return {
+    startTime: parsed[0] || "",
+    endTime: parsed[1] || ""
+  };
+}
+
+function normalizeTimeText(text) {
+  return String(text || "")
     .replace(/\b([0-2]?\d)\s*[.·]\s*([0-5]\d)\b/g, "$1:$2")
     .replace(/\bA\s*\.?\s*M\.?\b/gi, "AM")
     .replace(/\bP\s*\.?\s*M\.?\b/gi, "PM");
+}
 
-  let match = normalized.match(/\b(1[0-2]|0?[1-9])\s*:\s*([0-5]\d)\s*(AM|PM)\b/i);
-  if (match) return twelveToTwentyFour(Number(match[1]), Number(match[2]), match[3]);
+function containsTimeToken(value) {
+  return /\b(?:1[0-2]|0?[1-9])(?:\s*:\s*[0-5]\d)?\s*(?:AM|PM)\b|\b(?:[01]?\d|2[0-3])\s*:\s*[0-5]\d\b/i.test(value);
+}
 
-  match = normalized.match(/\b(1[0-2]|0?[1-9])\s*(AM|PM)\b/i);
-  if (match) return twelveToTwentyFour(Number(match[1]), 0, match[2]);
-
-  match = normalized.match(/(?:\btime\b\s*[:\-]?\s*)\b([01]?\d|2[0-3])\s*:\s*([0-5]\d)\b/i);
+function parseTimeToken(token) {
+  const value = String(token || "").trim().toUpperCase().replace(/\s+/g, "");
+  let match = /^(1[0-2]|0?[1-9])(?::([0-5]\d))?(AM|PM)$/.exec(value);
+  if (match) return twelveToTwentyFour(Number(match[1]), Number(match[2] || 0), match[3]);
+  match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(value);
   if (match) return `${pad(Number(match[1]))}:${pad(Number(match[2]))}`;
-
-  match = normalized.match(/\b([01]\d|2[0-3])\s*:\s*([0-5]\d)\b/);
-  if (match) return `${match[1]}:${match[2]}`;
-
   return "";
+}
+
+function extractTime(text) {
+  return extractTimeRange(text).startTime;
 }
 
 function twelveToTwentyFour(hours, minutes, period) {
@@ -615,13 +595,13 @@ function toDateInput(year, month, day) {
 function updateConversionPreview() {
   const converted = getBangladeshMeetingDateTime();
   if (!converted) {
-    elements.convertedDateTime.textContent = "Add the meeting date and time";
+    elements.convertedDateTime.textContent = "Add the meeting date and start time";
     elements.conversionNote.textContent = "The final message always uses Bangladesh Standard Time.";
     elements.conversionCard.classList.remove("converted");
     return;
   }
 
-  elements.convertedDateTime.textContent = `${formatDateForMessage(converted.date)} at ${formatTimeForMessage(converted.time)}`;
+  elements.convertedDateTime.textContent = formatConvertedRange(converted);
   if (elements.sourceTimezone.value === "Europe/London") {
     elements.conversionNote.textContent = `Converted automatically from United Kingdom Time (${converted.ukZoneName}) to Bangladesh Standard Time.`;
     elements.conversionCard.classList.add("converted");
@@ -634,20 +614,48 @@ function updateConversionPreview() {
 function getBangladeshMeetingDateTime() {
   const dateValue = elements.sourceDate.value;
   const timeValue = elements.sourceTime.value;
+  const endTimeValue = elements.sourceEndTime.value;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue) || !/^\d{2}:\d{2}$/.test(timeValue)) return null;
 
+  const endSourceDate = endTimeValue && endTimeValue <= timeValue ? addDaysToDateInput(dateValue, 1) : dateValue;
   if (elements.sourceTimezone.value === "Asia/Dhaka") {
-    return { date: dateValue, time: timeValue, ukZoneName: "" };
+    return {
+      date: dateValue,
+      time: timeValue,
+      endDate: endTimeValue ? endSourceDate : "",
+      endTime: endTimeValue,
+      ukZoneName: ""
+    };
   }
 
   const instant = zonedLocalToUtc(dateValue, timeValue, "Europe/London");
   if (!instant || Number.isNaN(instant.getTime())) return null;
   const dhaka = formatDateTimeInZone(instant, "Asia/Dhaka");
+  let endDhaka = null;
+  if (endTimeValue) {
+    const endInstant = zonedLocalToUtc(endSourceDate, endTimeValue, "Europe/London");
+    if (endInstant && !Number.isNaN(endInstant.getTime())) endDhaka = formatDateTimeInZone(endInstant, "Asia/Dhaka");
+  }
   return {
     date: dhaka.date,
     time: dhaka.time,
+    endDate: endDhaka?.date || "",
+    endTime: endDhaka?.time || "",
     ukZoneName: getTimeZoneName(instant, "Europe/London")
   };
+}
+
+function addDaysToDateInput(dateValue, days) {
+  const [year, month, day] = dateValue.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + days));
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+}
+
+function formatConvertedRange(converted) {
+  const start = `${formatDateForMessage(converted.date)} at ${formatTimeForMessage(converted.time)}`;
+  if (!converted.endTime) return start;
+  if (converted.endDate === converted.date) return `${start} – ${formatTimeForMessage(converted.endTime)}`;
+  return `${start} – ${formatDateForMessage(converted.endDate)} at ${formatTimeForMessage(converted.endTime)}`;
 }
 
 function zonedLocalToUtc(dateValue, timeValue, timeZone) {
@@ -738,7 +746,7 @@ function generateReminder() {
     email,
     "",
     `Date: ${formatDateForMessage(converted.date)}`,
-    `Time: ${formatTimeForMessage(converted.time)} (Bangladesh Standard Time)`,
+    `Time: ${formatReminderTimeRange(converted)} (Bangladesh Standard Time)`,
     `Meeting Link: ${meetingLink}`
   ];
 
@@ -750,6 +758,15 @@ function generateReminder() {
   elements.copyFeedback.textContent = elements.sourceTimezone.value === "Europe/London"
     ? "Reminder generated with UK time converted to Bangladesh time."
     : "Reminder generated and ready to copy.";
+}
+
+function formatReminderTimeRange(converted) {
+  const start = formatTimeForMessage(converted.time);
+  if (!converted.endTime) return start;
+  const end = formatTimeForMessage(converted.endTime);
+  return converted.endDate && converted.endDate !== converted.date
+    ? `${start} - ${end} (ends ${formatDateForMessage(converted.endDate)})`
+    : `${start} - ${end}`;
 }
 
 function formatDateForMessage(value) {
@@ -768,60 +785,66 @@ function formatTimeForMessage(value) {
 async function copyOutput() {
   const text = elements.outputMessage.value.trim();
   if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (error) {
-    elements.outputMessage.select();
-    document.execCommand("copy");
-  }
+  await copyTextToClipboard(text);
   elements.copyFeedback.textContent = "Copied to clipboard.";
   showToast("Reminder copied.");
 }
 
-async function sendToSlack() {
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (error) {
+    elements.outputMessage.focus();
+    elements.outputMessage.select();
+    document.execCommand("copy");
+  }
+}
+
+async function shareToSlack() {
   const text = elements.outputMessage.value.trim();
   if (!text) {
     showToast("Generate the reminder message first.");
     return;
   }
-  if (!isValidSlackWebhook(slackWebhookUrl)) {
-    showToast("Connect Slack before sending the reminder.");
-    openSlackSettings();
-    return;
+
+  const shareData = { title: "Meeting reminder", text };
+  if (typeof navigator.share === "function" && (!navigator.canShare || navigator.canShare(shareData))) {
+    try {
+      await navigator.share(shareData);
+      elements.shareFeedback.textContent = "Share menu opened. Select Slack to choose the conversation.";
+      showToast("Choose Slack from the share menu.");
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        elements.shareFeedback.textContent = "Sharing was cancelled.";
+        return;
+      }
+      console.warn("Native sharing failed; using desktop fallback.", error);
+    }
   }
 
-  elements.sendSlackBtn.disabled = true;
-  elements.sendSlackBtn.textContent = "Sending…";
-  elements.slackFeedback.textContent = "";
-  try {
-    const response = await fetch(slackWebhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json; charset=UTF-8" },
-      body: JSON.stringify({ text })
-    });
-    const responseText = await response.text();
-    if (!response.ok || responseText.trim().toLowerCase() !== "ok") {
-      throw new Error(responseText || `Slack returned HTTP ${response.status}`);
-    }
-    elements.slackFeedback.textContent = "Sent directly to Slack.";
-    showToast("Reminder sent to Slack.");
-  } catch (error) {
-    console.error("Slack send failed.", error);
-    elements.slackFeedback.textContent = "Slack could not confirm delivery. Check the webhook and browser network permissions.";
-    showToast("Could not send to Slack. Check Slack Settings.");
-  } finally {
-    elements.sendSlackBtn.textContent = "Send to Slack";
-    updateCopyState();
-  }
+  await copyTextToClipboard(text);
+  elements.shareFeedback.textContent = "Copied to clipboard. Slack is opening; paste the message into the required channel or chat.";
+  showToast("Copied. Paste the reminder in Slack.");
+  const slackWindow = window.open("https://app.slack.com/client", "_blank", "noopener,noreferrer");
+  if (!slackWindow) window.location.href = "https://app.slack.com/client";
+}
+
+function updateShareButtonLabel() {
+  const nativeShareAvailable = typeof navigator.share === "function";
+  elements.shareSlackBtn.textContent = nativeShareAvailable ? "Share to Slack" : "Copy & open Slack";
+  elements.shareSlackBtn.title = nativeShareAvailable
+    ? "Open your device share menu and choose Slack"
+    : "Copy the reminder and open Slack in a new tab";
 }
 
 function updateCopyState() {
   const empty = !elements.outputMessage.value.trim();
   elements.copyBtn.disabled = empty;
-  elements.sendSlackBtn.disabled = empty;
+  elements.shareSlackBtn.disabled = empty;
   if (empty) {
     elements.copyFeedback.textContent = "";
-    elements.slackFeedback.textContent = "";
+    elements.shareFeedback.textContent = "";
   }
 }
 
@@ -844,6 +867,7 @@ function resetForm() {
   elements.emailInput.value = "";
   elements.sourceDate.value = "";
   elements.sourceTime.value = "";
+  elements.sourceEndTime.value = "";
   elements.sourceTimezone.value = "Asia/Dhaka";
   elements.meetingLinkInput.value = "";
   elements.additionalNote.value = "";
@@ -884,6 +908,7 @@ window.ReminderGeneratorTest = {
   extractPartnerBrand,
   extractDate,
   extractTime,
+  extractTimeRange,
   extractTimezone,
   extractMeetingLink,
   zonedLocalToUtc,
