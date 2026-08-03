@@ -1103,6 +1103,23 @@ async function copyTextToClipboard(text) {
   }
 }
 
+function isLikelyMobileDevice() {
+  if (navigator.userAgentData && typeof navigator.userAgentData.mobile === "boolean") {
+    return navigator.userAgentData.mobile;
+  }
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "");
+}
+
+function openSlackDesktopApp() {
+  const link = document.createElement("a");
+  link.href = "slack://open";
+  link.setAttribute("aria-hidden", "true");
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 async function shareToSlack() {
   const text = elements.outputMessage.value.trim();
   if (!text) {
@@ -1111,10 +1128,14 @@ async function shareToSlack() {
   }
 
   const shareData = { title: "Meeting reminder", text };
-  if (typeof navigator.share === "function" && (!navigator.canShare || navigator.canShare(shareData))) {
+  const mobileNativeShare = isLikelyMobileDevice()
+    && typeof navigator.share === "function"
+    && (!navigator.canShare || navigator.canShare(shareData));
+
+  if (mobileNativeShare) {
     try {
       await navigator.share(shareData);
-      elements.shareFeedback.textContent = "Share menu opened. Select Slack to choose the conversation.";
+      elements.shareFeedback.textContent = "Share menu opened. Select Slack and choose the conversation.";
       showToast("Choose Slack from the share menu.");
       return;
     } catch (error) {
@@ -1122,23 +1143,22 @@ async function shareToSlack() {
         elements.shareFeedback.textContent = "Sharing was cancelled.";
         return;
       }
-      console.warn("Native sharing failed; using desktop fallback.", error);
+      console.warn("Native sharing failed; opening Slack directly.", error);
     }
   }
 
   await copyTextToClipboard(text);
-  elements.shareFeedback.textContent = "Copied to clipboard. Slack is opening; paste the message into the required channel or chat.";
+  elements.shareFeedback.innerHTML = 'Copied to clipboard. Slack Desktop is opening; paste the reminder into the required channel or chat. If it does not open, <a href="https://app.slack.com/client" target="_blank" rel="noopener noreferrer">open Slack Web</a>.';
   showToast("Copied. Paste the reminder in Slack.");
-  const slackWindow = window.open("https://app.slack.com/client", "_blank", "noopener,noreferrer");
-  if (!slackWindow) window.location.href = "https://app.slack.com/client";
+  openSlackDesktopApp();
 }
 
 function updateShareButtonLabel() {
-  const nativeShareAvailable = typeof navigator.share === "function";
-  elements.shareSlackBtn.textContent = nativeShareAvailable ? "Share to Slack" : "Copy & open Slack";
-  elements.shareSlackBtn.title = nativeShareAvailable
+  const mobileNativeShare = isLikelyMobileDevice() && typeof navigator.share === "function";
+  elements.shareSlackBtn.textContent = mobileNativeShare ? "Share to Slack" : "Copy & open Slack";
+  elements.shareSlackBtn.title = mobileNativeShare
     ? "Open your device share menu and choose Slack"
-    : "Copy the reminder and open Slack in a new tab";
+    : "Copy the reminder and open the Slack desktop app";
 }
 
 function updateCopyState() {
