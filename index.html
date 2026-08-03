@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="Generate consistent Slack messages from screenshots and reusable reminder templates." />
-  <title>Slack Message Generator</title>
+  <meta name="description" content="Create Bangladesh-time Slack meeting reminders from screenshots." />
+  <title>Slack Reminder Generator</title>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <link rel="stylesheet" href="styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/tesseract.min.js" defer></script>
@@ -13,45 +13,37 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand-mark" aria-label="Slack Message Generator">
-      <div class="logo">S</div>
+    <div class="brand-mark" aria-label="Slack Reminder Generator">
+      <div class="logo" aria-hidden="true">R</div>
       <div>
-        <h1>Slack Message Generator</h1>
-        <p>Screenshot messages and automated reminder templates</p>
+        <h1>Slack Reminder Generator</h1>
+        <p>Extract meeting details from a screenshot and generate a Bangladesh-time reminder</p>
       </div>
     </div>
-
     <div class="topbar-actions">
-      <nav class="mode-tabs" aria-label="Generator type">
-        <button id="screenshotModeBtn" class="mode-tab active" type="button" aria-pressed="true">
-          Screenshot message
-        </button>
-        <button id="templateModeBtn" class="mode-tab" type="button" aria-pressed="false">
-          Reminder template
-        </button>
-      </nav>
-      <button id="openSettingsBtn" class="btn btn-secondary" type="button">
-        Representative Settings
-      </button>
+      <button id="openSlackSettingsBtn" class="btn btn-secondary" type="button">Slack Settings</button>
+      <button id="openSettingsBtn" class="btn btn-secondary" type="button">Representative Settings</button>
     </div>
   </header>
 
-  <main id="screenshotView" class="app-shell generator-view">
-    <section class="panel source-panel" aria-labelledby="sourceHeading">
+  <main class="app-shell">
+    <section class="panel screenshot-panel" aria-labelledby="screenshotHeading">
       <div class="panel-heading">
         <div>
           <span class="step">1</span>
-          <h2 id="sourceHeading">Add screenshot</h2>
+          <h2 id="screenshotHeading">Add meeting screenshot</h2>
         </div>
         <button id="clearImageBtn" class="text-btn" type="button" disabled>Clear</button>
       </div>
 
-      <div id="dropZone" class="drop-zone" tabindex="0" role="button" aria-label="Upload or paste a screenshot">
+      <p class="section-help">Upload, drop, or paste the screenshot. OCR will try to fetch the meeting link, email, date, time, time zone, brand, and labelled partner brand.</p>
+
+      <div id="dropZone" class="drop-zone" tabindex="0" role="button" aria-label="Upload or paste a meeting screenshot">
         <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" hidden />
         <div id="emptyDropState" class="drop-empty">
           <div class="upload-icon" aria-hidden="true">⇧</div>
           <strong>Drop a screenshot here</strong>
-          <span>or choose one of the options below</span>
+          <span>or use one of the options below</span>
           <div class="drop-actions">
             <button id="uploadBtn" class="btn btn-primary" type="button">Upload screenshot</button>
             <button id="pasteBtn" class="btn btn-secondary" type="button">Paste screenshot</button>
@@ -59,7 +51,7 @@
           <small>You can also press Ctrl+V anywhere on this page.</small>
         </div>
         <div id="imageState" class="image-state" hidden>
-          <img id="previewImage" alt="Screenshot preview" />
+          <img id="previewImage" alt="Meeting screenshot preview" />
           <div class="image-overlay">
             <span id="imageName">Screenshot</span>
             <button id="replaceImageBtn" class="btn btn-small" type="button">Replace</button>
@@ -72,29 +64,31 @@
           <span id="ocrStatusText">Preparing OCR…</span>
           <strong id="ocrPercent">0%</strong>
         </div>
-        <div class="progress-track" aria-hidden="true">
-          <div id="progressBar" class="progress-bar"></div>
-        </div>
+        <div class="progress-track" aria-hidden="true"><div id="progressBar" class="progress-bar"></div></div>
       </div>
 
-      <div class="field-group">
-        <div class="field-label-row">
-          <label for="extractedText">Extracted text</label>
-          <div class="inline-actions">
-            <button id="cleanTextBtn" class="text-btn" type="button">Clean text</button>
-            <button id="runOcrBtn" class="text-btn" type="button" disabled>Run OCR again</button>
+      <div id="extractionResult" class="extraction-result" hidden aria-live="polite"></div>
+
+      <details class="ocr-details">
+        <summary>Review extracted screenshot text</summary>
+        <div class="field-group details-content">
+          <div class="field-label-row">
+            <label for="extractedText">OCR text</label>
+            <div class="inline-actions">
+              <button id="fetchDetailsBtn" class="text-btn" type="button">Fetch details</button>
+              <button id="runOcrBtn" class="text-btn" type="button" disabled>Run OCR again</button>
+            </div>
           </div>
+          <textarea id="extractedText" rows="10" placeholder="Extracted screenshot text will appear here. You can edit or paste text manually."></textarea>
         </div>
-        <textarea id="extractedText" rows="12" placeholder="Screenshot text will appear here. You can also type or paste text manually."></textarea>
-        <div class="textarea-meta"><span id="textCount">0 characters</span></div>
-      </div>
+      </details>
     </section>
 
-    <section class="panel generator-panel" aria-labelledby="generatorHeading">
+    <section class="panel reminder-panel" aria-labelledby="reminderHeading">
       <div class="panel-heading">
         <div>
           <span class="step">2</span>
-          <h2 id="generatorHeading">Build message</h2>
+          <h2 id="reminderHeading">Review reminder details</h2>
         </div>
       </div>
 
@@ -108,174 +102,80 @@
           <div>
             <span class="eyebrow">Assigned representative</span>
             <strong id="representativeName">Not configured</strong>
-            <small id="representativeMention">Add a representative in settings</small>
+            <small id="representativeMention">The default greeting will use “bhai”</small>
           </div>
           <button id="editCurrentRepBtn" class="text-btn" type="button">Edit</button>
         </div>
 
-        <div class="field-group">
-          <label for="messageType">Message type</label>
-          <select id="messageType">
-            <option value="general">General enquiry</option>
-            <option value="customer">Customer issue</option>
-            <option value="payment">Payment issue</option>
-            <option value="course">Course/content issue</option>
-            <option value="technical">Technical issue</option>
-            <option value="refund">Refund request</option>
-            <option value="urgent">Urgent escalation</option>
-          </select>
-        </div>
-
-        <div class="field-group">
-          <label for="toneSelect">Tone</label>
-          <select id="toneSelect">
-            <option value="professional">Professional</option>
-            <option value="concise">Concise</option>
-            <option value="friendly">Friendly</option>
-            <option value="urgent">Urgent</option>
-          </select>
+        <div class="field-group full-width">
+          <label for="partnerBrandInput">Meeting with partner brand</label>
+          <input id="partnerBrandInput" type="text" placeholder="Enter the partner brand or organisation name" autocomplete="organization" />
         </div>
 
         <div class="field-group full-width">
-          <label for="actionSelect">Requested action</label>
-          <select id="actionSelect">
-            <option value="review">Please review and advise</option>
-            <option value="reply">Please prepare a response</option>
-            <option value="resolve">Please investigate and resolve</option>
-            <option value="confirm">Please confirm the next step</option>
-            <option value="contact">Please contact the customer</option>
-            <option value="custom">Custom action</option>
-          </select>
+          <label for="emailInput">Email address</label>
+          <input id="emailInput" type="email" placeholder="info@email.com" autocomplete="email" />
         </div>
 
-        <div id="customActionGroup" class="field-group full-width" hidden>
-          <label for="customAction">Custom action</label>
-          <input id="customAction" type="text" placeholder="e.g. Please check the learner account and update me" />
+        <div class="field-group">
+          <label for="sourceDate">Screenshot meeting date</label>
+          <input id="sourceDate" type="date" />
+        </div>
+
+        <div class="field-group">
+          <label for="sourceTime">Screenshot meeting time</label>
+          <input id="sourceTime" type="time" />
         </div>
 
         <div class="field-group full-width">
-          <label for="referenceInput">Reference <span class="optional">optional</span></label>
-          <input id="referenceInput" type="text" placeholder="Order ID, learner email, invoice number, ticket number, etc." />
+          <label for="sourceTimezone">Screenshot time zone</label>
+          <select id="sourceTimezone">
+            <option value="Asia/Dhaka">Bangladesh Standard Time</option>
+            <option value="Europe/London">United Kingdom Time</option>
+          </select>
+          <small class="field-help">United Kingdom Time is converted using the correct GMT or British Summer Time offset for the selected date.</small>
+        </div>
+
+        <div id="conversionCard" class="conversion-card full-width" aria-live="polite">
+          <span class="eyebrow">Reminder time in Bangladesh</span>
+          <strong id="convertedDateTime">Add the meeting date and time</strong>
+          <small id="conversionNote">The final message always uses Bangladesh Standard Time.</small>
+        </div>
+
+        <div class="field-group full-width">
+          <label for="meetingLinkInput">Meeting link</label>
+          <input id="meetingLinkInput" type="url" placeholder="https://example.com/meeting-link" />
+        </div>
+
+        <div class="field-group full-width">
+          <label for="additionalNote">Additional note <span class="optional">optional</span></label>
+          <textarea id="additionalNote" rows="3" placeholder="Add any extra instruction or context."></textarea>
         </div>
       </div>
 
-      <button id="generateBtn" class="btn btn-primary btn-large" type="button">Generate Slack message</button>
+      <button id="generateBtn" class="btn btn-primary btn-large" type="button">Generate reminder message</button>
 
       <div class="output-card">
         <div class="output-heading">
           <div>
             <span class="step">3</span>
-            <h2>Slack message</h2>
+            <h2>Slack reminder</h2>
           </div>
           <div class="output-actions">
             <button id="resetBtn" class="text-btn" type="button">Reset</button>
             <button id="copyBtn" class="btn btn-secondary btn-small" type="button" disabled>Copy message</button>
+            <button id="sendSlackBtn" class="btn btn-slack btn-small" type="button" disabled>Send to Slack</button>
           </div>
         </div>
-        <textarea id="outputMessage" rows="15" placeholder="Your generated Slack message will appear here."></textarea>
+        <textarea id="outputMessage" rows="14" placeholder="Your reminder message will appear here."></textarea>
         <div id="copyFeedback" class="copy-feedback" aria-live="polite"></div>
+        <div id="slackFeedback" class="slack-feedback" aria-live="polite"></div>
       </div>
-    </section>
-  </main>
-
-  <main id="templateView" class="app-shell generator-view template-shell" hidden>
-    <section class="panel template-form-panel" aria-labelledby="templateFormHeading">
-      <div class="panel-heading">
-        <div>
-          <span class="step">1</span>
-          <h2 id="templateFormHeading">Create reminder template</h2>
-        </div>
-        <button id="setCurrentDateTimeBtn" class="btn btn-secondary btn-small" type="button">
-          Use current Bangladesh time
-        </button>
-      </div>
-
-      <div class="form-grid">
-        <div class="field-group full-width">
-          <label for="templateBrandSelect">Brand</label>
-          <select id="templateBrandSelect"></select>
-        </div>
-
-        <div class="representative-card full-width">
-          <div>
-            <span class="eyebrow">Assigned representative</span>
-            <strong id="templateRepresentativeName">Not configured</strong>
-            <small id="templateRepresentativeMention">Add a representative in settings</small>
-          </div>
-          <button id="editTemplateRepBtn" class="text-btn" type="button">Edit</button>
-        </div>
-
-        <div class="field-group full-width">
-          <label for="templateEmail">Email address</label>
-          <input id="templateEmail" type="email" placeholder="info@email.com" autocomplete="email" />
-        </div>
-
-        <div class="field-group">
-          <label for="templateDate">Meeting date</label>
-          <input id="templateDate" type="date" />
-        </div>
-
-        <div class="field-group">
-          <label for="templateTime">Meeting time</label>
-          <input id="templateTime" type="time" />
-        </div>
-
-        <div class="field-group full-width">
-          <label for="templateTimezone">Time-zone label</label>
-          <input id="templateTimezone" type="text" value="Bangladesh Time" placeholder="Bangladesh Time" />
-        </div>
-
-        <div class="field-group full-width">
-          <label for="templateMeetingLink">Meeting link</label>
-          <input id="templateMeetingLink" type="url" placeholder="https://example.com/meeting-link" />
-        </div>
-
-        <div class="field-group full-width">
-          <label for="templateGreeting">Greeting</label>
-          <input id="templateGreeting" type="text" value="Assalamu Alaikum bhai," />
-        </div>
-
-        <div class="field-group full-width">
-          <label for="templateIntro">Reminder text</label>
-          <input id="templateIntro" type="text" value="This is an automated reminder." />
-        </div>
-
-        <div class="field-group full-width">
-          <label for="templateAdditionalNote">Additional note <span class="optional">optional</span></label>
-          <textarea id="templateAdditionalNote" rows="3" placeholder="Add any extra instruction or context."></textarea>
-        </div>
-      </div>
-
-      <button id="generateTemplateBtn" class="btn btn-primary btn-large" type="button">
-        Generate reminder message
-      </button>
-    </section>
-
-    <section class="panel template-output-panel" aria-labelledby="templateOutputHeading">
-      <div class="output-heading">
-        <div>
-          <span class="step">2</span>
-          <h2 id="templateOutputHeading">Reminder message</h2>
-        </div>
-        <div class="output-actions">
-          <button id="resetTemplateBtn" class="text-btn" type="button">Reset</button>
-          <button id="copyTemplateBtn" class="btn btn-secondary btn-small" type="button" disabled>
-            Copy message
-          </button>
-        </div>
-      </div>
-
-      <div class="template-example">
-        The generated message follows your supplied automated reminder layout and remains editable before copying.
-      </div>
-
-      <textarea id="templateOutputMessage" rows="18" placeholder="Your reminder template will appear here."></textarea>
-      <div id="templateCopyFeedback" class="copy-feedback" aria-live="polite"></div>
     </section>
   </main>
 
   <footer>
-    <p>OCR runs locally in your browser. Screenshots are not uploaded to a server.</p>
+    <p>OCR runs in the browser. Screenshots are not uploaded to a custom server.</p>
   </footer>
 
   <dialog id="settingsDialog" class="settings-dialog">
@@ -283,13 +183,13 @@
       <div class="dialog-heading">
         <div>
           <h2>Brand representatives</h2>
-          <p>Set the person and Slack member ID for each brand.</p>
+          <p>Set the representative used in the greeting for each brand.</p>
         </div>
         <button id="closeSettingsBtn" class="icon-btn" type="button" aria-label="Close settings">×</button>
       </div>
 
       <div class="settings-help">
-        <strong>Slack member ID example:</strong> U012AB3CD. The generated mention will be <code>&lt;@U012AB3CD&gt;</code>.
+        With a Slack member ID, the greeting uses a Slack mention. Without one, it uses the representative name. Blank brands use “Assalamu Alaikum bhai,”.
       </div>
 
       <div class="settings-table-wrap">
@@ -310,6 +210,42 @@
         <div>
           <button id="cancelSettingsBtn" class="btn btn-secondary" type="button">Cancel</button>
           <button id="saveSettingsBtn" class="btn btn-primary" type="submit">Save representatives</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+
+  <dialog id="slackDialog" class="settings-dialog slack-dialog">
+    <form method="dialog" class="dialog-card" id="slackForm">
+      <div class="dialog-heading">
+        <div>
+          <h2>Slack connection</h2>
+          <p>Connect the reminder generator to one Slack channel using an Incoming Webhook.</p>
+        </div>
+        <button id="closeSlackDialogBtn" class="icon-btn" type="button" aria-label="Close Slack settings">×</button>
+      </div>
+
+      <div class="settings-help">
+        Create an Incoming Webhook in Slack and paste its URL below. The URL is a secret and is never added to the GitHub repository.
+      </div>
+
+      <div class="field-group">
+        <label for="slackWebhookInput">Slack Incoming Webhook URL</label>
+        <input id="slackWebhookInput" type="password" inputmode="url" autocomplete="off" placeholder="https://hooks.slack.com/services/..." />
+        <small class="field-help">The message will be posted to the channel selected when the webhook was created.</small>
+      </div>
+
+      <label class="checkbox-row" for="rememberSlackWebhook">
+        <input id="rememberSlackWebhook" type="checkbox" />
+        <span>Remember this webhook in this browser</span>
+      </label>
+
+      <div class="dialog-actions">
+        <button id="clearSlackWebhookBtn" class="btn btn-danger-secondary" type="button">Remove connection</button>
+        <div>
+          <button id="cancelSlackDialogBtn" class="btn btn-secondary" type="button">Cancel</button>
+          <button id="saveSlackWebhookBtn" class="btn btn-primary" type="submit">Save Slack connection</button>
         </div>
       </div>
     </form>
