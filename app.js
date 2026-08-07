@@ -1129,12 +1129,12 @@ async function shareToSlack() {
 
   const shareData = { title: "Meeting reminder", text };
   const mobileNativeShare = isLikelyMobileDevice()
-    && typeof navigator.share === "function"
+    && typeof navigator.clipboard.writeText === "function"
     && (!navigator.canShare || navigator.canShare(shareData));
 
   if (mobileNativeShare) {
     try {
-      await navigator.share(shareData);
+      await navigator.clipboard.writeText(shareData);
       elements.shareFeedback.textContent = "Share menu opened. Select Slack and choose the conversation.";
       showToast("Choose Slack from the share menu.");
       return;
@@ -1154,7 +1154,7 @@ async function shareToSlack() {
 }
 
 function updateShareButtonLabel() {
-  const mobileNativeShare = isLikelyMobileDevice() && typeof navigator.share === "function";
+  const mobileNativeShare = isLikelyMobileDevice() && typeof navigator.clipboard.writeText === "function";
   elements.shareSlackBtn.textContent = mobileNativeShare ? "Share to Slack" : "Copy & open Slack";
   elements.shareSlackBtn.title = mobileNativeShare
     ? "Open your device share menu and choose Slack"
