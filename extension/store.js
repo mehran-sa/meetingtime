@@ -11,7 +11,8 @@
   const core = root.MeetingCore;
   const BRAND_CONFIG = Array.isArray(root.BRAND_CONFIG) ? root.BRAND_CONFIG : [];
   const BRANDS = BRAND_CONFIG.map((item) => String(item.brand || "").trim()).filter(Boolean);
-  const DEFAULT_SETTINGS = { notify: true, leadMinutes: 10, webAppUrl: "", keepPastDays: 14 };
+  const DEFAULT_SETTINGS = { notify: true, leadMinutes: 10 };
+  const KEEP_PAST_DAYS = 7;
   const DRAFT_MAX_AGE_MS = 10 * 60 * 1000;
   const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -34,7 +35,6 @@
       endTime: details.endTime || "",
       timezone: converted.sourceZone,
       meetingLink: String(details.meetingLink || "").trim(),
-      note: core.cleanText(details.note),
       startUtc: converted.startUtc,
       endUtc: converted.endUtc,
       sourceUrl: details.sourceUrl || existing?.sourceUrl || "",
@@ -58,10 +58,15 @@
     await chrome.storage.local.set({ meetings: meetings.filter((item) => item.id !== id) });
   }
 
-  /* Drop meetings that ended longer ago than the "keep past meetings" setting. */
+  /* Wipe every tracked meeting, plus the pending draft and reminder bookkeeping. */
+  function deleteAllMeetings() {
+    return Promise.all([chrome.storage.local.set({ meetings: [] }), chrome.storage.local.remove(["draft", "notified"])]);
+  }
+
+  /* Drop meetings that ended more than a week ago. */
   async function pruneMeetings() {
-    const [meetings, settings] = await Promise.all([getMeetings(), getSettings()]);
-    const cutoff = Date.now() - settings.keepPastDays * DAY_MS;
+    const meetings = await getMeetings();
+    const cutoff = Date.now() - KEEP_PAST_DAYS * DAY_MS;
     const kept = meetings.filter((item) => meetingEnd(item) >= cutoff);
     if (kept.length !== meetings.length) await chrome.storage.local.set({ meetings: kept });
   }
@@ -75,10 +80,7 @@
     const { settings } = await chrome.storage.sync.get({ settings: {} });
     const merged = { ...DEFAULT_SETTINGS, ...(settings || {}) };
     merged.leadMinutes = Math.min(120, Math.max(1, Number(merged.leadMinutes) || DEFAULT_SETTINGS.leadMinutes));
-    merged.keepPastDays = Math.min(90, Math.max(1, Number(merged.keepPastDays) || DEFAULT_SETTINGS.keepPastDays));
-    merged.notify = merged.notify !== false;
-    merged.webAppUrl = String(merged.webAppUrl || "").trim();
-    return merged;
+    return { notify: merged.notify !== false, leadMinutes: merged.leadMinutes };
   }
 
   function saveSettings(settings) {
@@ -122,7 +124,7 @@
 
   root.MeetingStore = {
     BRANDS, DEFAULT_SETTINGS,
-    getMeetings, saveMeeting, deleteMeeting, pruneMeetings, meetingEnd,
+    getMeetings, saveMeeting, deleteMeeting, deleteAllMeetings, pruneMeetings, meetingEnd,
     getSettings, saveSettings, getRepresentatives, saveRepresentatives,
     setDraft, takeDraft, reminderFor
   };

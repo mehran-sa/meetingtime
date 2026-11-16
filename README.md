@@ -11,9 +11,9 @@ Two tools that share one set of rules for reading meeting details and converting
 
 Open `index.html` through any static server (for example `npx serve .`), or use the GitHub Pages site.
 
-1. Drop, upload or paste (Ctrl + V) a screenshot. Pasting copied text works too.
-2. Check the details. Fields the scan filled in are tinted green until you edit them.
-3. The reminder writes itself as soon as email, date, start time and link are present. Copy it, or copy and open Slack. Ctrl + Enter also copies.
+1. Drop, choose or paste (Ctrl + V) a screenshot. No screenshot? Paste the invite text instead.
+2. Check the details. Fields the scan filled in stay green until you edit them.
+3. The reminder appears as soon as email, date, start time and link are present. Copy it, or copy and open Slack.
 
 If you edit the message by hand, it stops following the form until you press "Rebuild from details".
 
@@ -28,18 +28,27 @@ If you edit the message by hand, it stops following the form until you press "Re
 ### Use
 
 - **Track meeting from this page**: open the invite, booking email or calendar event, then press the button. It reads the date, time, time zone, brand, email and the real meeting link behind "Join" buttons. If the page is busy, select the invite text first.
-- **Right-click** a meeting link, selected text or the page, and choose a "Track…" entry.
-- The popup lists meetings in Bangladesh time with Join, Copy reminder and Copy link.
+- **Right-click** a meeting link, selected text or the page and choose "Track this meeting".
+- The popup lists meetings in Bangladesh time with Join, Copy reminder and Edit (delete is inside Edit).
 - A desktop notification appears before each meeting (10 minutes by default) with a Join button. The badge shows how many meetings are left today.
-- **Settings** (slider icon): reminder timing, representatives, and the web address of the full tool so the popup can hand a meeting over to it.
+- **Settings**: reminder timing, representatives, and "Delete all meetings".
 
 Meetings are stored only in the browser. The extension asks for no site access up front; it reads a page only when you click.
+
+### Security
+
+- No network requests: the manifest's content security policy sets `connect-src 'none'`, and all code and fonts are bundled.
+- Each meeting shows the domain its link goes to. Links that are not a known meeting provider are marked "Check link".
+- Stored meetings are not encrypted. They are removed a week after they end, and Settings has "Delete all meetings".
+- For reviewed, auto-updating installs, publish it privately on the Chrome Web Store: see `store/STORE-LISTING.md`.
 
 ## Configuration
 
 `brand-config.js` holds the brand list with each brand's representative and Slack member ID. Both tools read it. People can override representatives in their own browser (web app: Representatives; extension: Settings).
 
-Time zones and recognised meeting providers are at the top of `core.js`.
+Time zones (Bangladesh and UK) and recognised meeting providers are at the top of `core.js`.
+
+The look follows staffasia.org: square corners, black Epilogue headings in capitals with a green dash, Poppins text, green highlights and an orange main button.
 
 ## Development
 

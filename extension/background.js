@@ -10,13 +10,11 @@ const capture = globalThis.MeetingCapture;
 
 const ALARM_PREFIX = "meeting:";
 const TICK_ALARM = "tick";
-const MENU = { link: "track-link", selection: "track-selection", page: "track-page" };
+const MENU_ID = "track-meeting";
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({ id: MENU.link, title: "Track this meeting link", contexts: ["link"] });
-    chrome.contextMenus.create({ id: MENU.selection, title: "Track meeting from selected text", contexts: ["selection"] });
-    chrome.contextMenus.create({ id: MENU.page, title: "Track meeting from this page", contexts: ["page"] });
+    chrome.contextMenus.create({ id: MENU_ID, title: "Track this meeting", contexts: ["page", "selection", "link"] });
   });
   refresh();
 });
@@ -32,15 +30,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId !== MENU_ID) return;
   let details = {};
   try {
-    if (info.menuItemId === MENU.link) {
-      // A selection around the link usually carries the date and time too.
+    if (info.linkUrl || info.selectionText) {
+      // Right-clicked a link or a selection: read just that. A selection around
+      // a link usually carries the date and time too.
       details = core.extractReminderDetails(info.selectionText || "", store.BRANDS);
-      details.meetingLink = core.cleanUrlCandidate(info.linkUrl);
-    } else if (info.menuItemId === MENU.selection) {
-      details = core.extractReminderDetails(info.selectionText || "", store.BRANDS);
-      if (!core.isMeetingUrl(details.meetingLink)) details.meetingLink = "";
+      if (info.linkUrl) details.meetingLink = core.cleanUrlCandidate(info.linkUrl);
+      else if (!core.isMeetingUrl(details.meetingLink)) details.meetingLink = "";
     } else if (tab?.id) {
       details = await capture.captureFromTab(tab.id, store.BRANDS);
     }

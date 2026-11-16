@@ -18,53 +18,19 @@
     {
       id: "Europe/London",
       label: "United Kingdom Time",
+      shortLabel: "UK time",
       match: [/united\s*kingdom\s*time|uk\s*time|british\s*summer\s*time|greenwich\s*mean\s*time|europe\s*\/\s*london|london\s*time/]
     },
     {
       id: "Asia/Dhaka",
       label: "Bangladesh Standard Time",
+      shortLabel: "Bangladesh time",
       match: [/bangladesh\s*standard\s*time|bangladesh\s*time|asia\s*\/\s*dhaka|dhaka\s*time|\bbdt\b|\b(?:gmt|utc)\s*\+\s*0?6(?::?00)?\b/]
-    },
-    {
-      id: "America/New_York",
-      label: "US Eastern Time",
-      match: [/eastern\s*(?:standard\s*|daylight\s*)?time|america\s*\/\s*new_york|new\s*york\s*time|\b(?:est|edt)\b/]
-    },
-    {
-      id: "America/Chicago",
-      label: "US Central Time",
-      match: [/central\s*(?:standard\s*|daylight\s*)?time\s*(?:\(us|-\s*us|us)|america\s*\/\s*chicago|chicago\s*time|\bcdt\b/]
-    },
-    {
-      id: "America/Los_Angeles",
-      label: "US Pacific Time",
-      match: [/pacific\s*(?:standard\s*|daylight\s*)?time|america\s*\/\s*los_angeles|\b(?:pst|pdt)\b/]
-    },
-    {
-      id: "Europe/Berlin",
-      label: "Central European Time",
-      match: [/central\s*european\s*(?:summer\s*|standard\s*)?time|europe\s*\/\s*(?:berlin|paris|madrid|rome|amsterdam)|\b(?:cet|cest)\b/]
-    },
-    {
-      id: "Asia/Dubai",
-      label: "Gulf Standard Time",
-      match: [/gulf\s*standard\s*time|asia\s*\/\s*dubai|dubai\s*time/]
-    },
-    {
-      id: "Asia/Kolkata",
-      label: "India Standard Time",
-      match: [/india(?:n)?\s*standard\s*time|asia\s*\/\s*(?:kolkata|calcutta)/]
-    },
-    {
-      id: "Australia/Sydney",
-      label: "Australian Eastern Time",
-      match: [/australian\s*eastern\s*(?:standard\s*|daylight\s*)?time|australia\s*\/\s*(?:sydney|melbourne)|\b(?:aest|aedt)\b/]
     }
   ];
 
-  /* Order shown in the time zone pickers: the two everyday zones first. */
-  const TIMEZONE_ORDER = ["Asia/Dhaka", "Europe/London", "Europe/Berlin", "America/New_York",
-    "America/Chicago", "America/Los_Angeles", "Asia/Dubai", "Asia/Kolkata", "Australia/Sydney"];
+  /* Order shown in the time zone pickers. */
+  const TIMEZONE_ORDER = ["Asia/Dhaka", "Europe/London"];
 
   const MEETING_PROVIDERS = [
     { name: "Google Meet", host: "meet\\.google\\.com" },
@@ -587,34 +553,6 @@
     return missing;
   }
 
-  /* ---------- hand-off between the extension and the web app ---------- */
-
-  const PREFILL_FIELDS = ["brand", "partnerBrand", "email", "date", "time", "endTime", "timezone", "meetingLink", "note"];
-
-  function encodePrefill(details) {
-    const payload = {};
-    PREFILL_FIELDS.forEach((key) => {
-      if (details?.[key]) payload[key] = String(details[key]);
-    });
-    return `prefill=${encodeURIComponent(JSON.stringify(payload))}`;
-  }
-
-  function decodePrefill(hash) {
-    const match = /(?:^|[#&])prefill=([^&]+)/.exec(String(hash || ""));
-    if (!match) return null;
-    try {
-      const parsed = JSON.parse(decodeURIComponent(match[1]));
-      if (!parsed || typeof parsed !== "object") return null;
-      const details = {};
-      PREFILL_FIELDS.forEach((key) => {
-        if (typeof parsed[key] === "string") details[key] = parsed[key].slice(0, 2000);
-      });
-      return details;
-    } catch (error) {
-      return null;
-    }
-  }
-
   const api = {
     TARGET_ZONE, TARGET_ZONE_LABEL, TIMEZONES, MONTH_NAMES,
     pad, cleanText, normalizeSearchText, normalizeSlackId,
@@ -625,8 +563,7 @@
     scoreOcrText, formatPaddleOcrItems,
     zonedLocalToUtc, formatDateTimeInZone, getTimeZoneName, addDaysToDateInput, convertToDhaka,
     formatDateForMessage, formatTimeForMessage, formatWeekday, formatConvertedRange, formatReminderTimeRange,
-    buildGreeting, buildReminderMessage, findMissingFields,
-    encodePrefill, decodePrefill
+    buildGreeting, buildReminderMessage, findMissingFields
   };
 
   root.MeetingCore = api;

@@ -59,14 +59,13 @@ function init() {
   state.representatives = loadRepresentatives();
 
   el.brandSelect.replaceChildren(...BRANDS.map((brand) => new Option(brand, brand)));
-  el.sourceTimezone.replaceChildren(...core.orderedTimezones().map((zone) => new Option(zone.label, zone.id)));
+  el.sourceTimezone.replaceChildren(...core.orderedTimezones().map((zone) => new Option(zone.shortLabel, zone.id)));
 
   bindImageEvents();
   bindFormEvents();
   bindSettingsEvents();
   updateShareButtonLabel();
   updateRepresentativeCard();
-  applyPrefillFromHash();
   refreshOutput();
 }
 
@@ -91,10 +90,6 @@ function bindImageEvents() {
     const file = el.fileInput.files?.[0];
     if (file) handleImageFile(file);
     el.fileInput.value = "";
-  });
-  el.pasteBtn.addEventListener("click", (event) => {
-    event.stopPropagation();
-    pasteFromClipboard();
   });
   document.addEventListener("paste", handlePasteEvent);
 
@@ -124,7 +119,6 @@ function bindImageEvents() {
   });
 
   el.clearImageBtn.addEventListener("click", clearImage);
-  el.runOcrBtn.addEventListener("click", runOcr);
   el.fetchDetailsBtn.addEventListener("click", () => readDetailsFromText(el.extractedText.value, "text"));
 }
 
@@ -172,19 +166,12 @@ function bindFormEvents() {
       copyOutput();
     }
   });
-  window.addEventListener("hashchange", () => {
-    if (applyPrefillFromHash()) refreshOutput();
-  });
 }
 
 function bindSettingsEvents() {
   el.openSettingsBtn.addEventListener("click", () => openSettings());
   el.closeSettingsBtn.addEventListener("click", () => el.settingsDialog.close());
   el.cancelSettingsBtn.addEventListener("click", () => el.settingsDialog.close());
-  el.clearSettingsBtn.addEventListener("click", () => {
-    el.representativeRows.querySelectorAll("input").forEach((input) => { input.value = ""; });
-  });
-  el.settingsSearch.addEventListener("input", filterRepresentativeRows);
   el.settingsForm.addEventListener("submit", saveRepresentativeSettings);
   // Clicking the dimmed backdrop closes the dialog without saving.
   el.settingsDialog.addEventListener("click", (event) => {
@@ -220,15 +207,12 @@ function currentRepresentative() {
 
 function updateRepresentativeCard() {
   const rep = currentRepresentative();
-  el.representativeName.textContent = rep.name || (rep.slackId ? `<@${rep.slackId}>` : "Not set");
-  if (rep.slackId) el.representativeMention.textContent = "Greeting will @mention them in Slack";
-  else if (rep.name) el.representativeMention.textContent = `Greeting will say “${rep.name} bhai”`;
-  else el.representativeMention.textContent = "Greeting will say “bhai”";
-  el.editCurrentRepBtn.textContent = rep.name || rep.slackId ? "Change" : "Set";
+  if (rep.slackId) el.representativeMention.textContent = `Greets ${rep.name || "them"} with an @mention`;
+  else if (rep.name) el.representativeMention.textContent = `Greets “${rep.name} bhai”`;
+  else el.representativeMention.textContent = "Greets “bhai”";
 }
 
 function openSettings(focusBrand = "") {
-  el.settingsSearch.value = "";
   el.representativeRows.innerHTML = BRANDS.map((brand) => {
     const rep = state.representatives[brand] || { name: "", slackId: "" };
     return `
@@ -245,13 +229,6 @@ function openSettings(focusBrand = "") {
   row.classList.add("is-focus");
   row.scrollIntoView({ block: "center" });
   row.querySelector('[data-field="name"]').focus();
-}
-
-function filterRepresentativeRows() {
-  const query = core.normalizeSearchText(el.settingsSearch.value);
-  [...el.representativeRows.rows].forEach((row) => {
-    row.hidden = Boolean(query) && !core.normalizeSearchText(row.dataset.brand).includes(query);
-  });
 }
 
 function saveRepresentativeSettings(event) {
@@ -276,32 +253,6 @@ function saveRepresentativeSettings(event) {
 }
 
 /* ---------- getting the meeting in: image or text ---------- */
-
-async function pasteFromClipboard() {
-  if (!navigator.clipboard?.read) {
-    showToast("This browser can't read the clipboard from a button. Press Ctrl + V instead.");
-    return;
-  }
-  try {
-    const items = await navigator.clipboard.read();
-    for (const item of items) {
-      const imageType = item.types.find((type) => type.startsWith("image/"));
-      if (!imageType) continue;
-      const blob = await item.getType(imageType);
-      handleImageFile(new File([blob], "Pasted screenshot", { type: imageType }));
-      return;
-    }
-    const textItem = items.find((item) => item.types.includes("text/plain"));
-    if (textItem) {
-      readDetailsFromText(await (await textItem.getType("text/plain")).text(), "paste");
-      return;
-    }
-    showToast("The clipboard has no screenshot or text. Copy one and try again.");
-  } catch (error) {
-    console.warn(error);
-    showToast("Clipboard access was blocked. Press Ctrl + V instead.");
-  }
-}
 
 function handlePasteEvent(event) {
   if (el.settingsDialog.open) return;
@@ -335,11 +286,9 @@ function handleImageFile(file) {
   const objectUrl = URL.createObjectURL(file);
   el.previewImage.onload = () => URL.revokeObjectURL(objectUrl);
   el.previewImage.src = objectUrl;
-  el.imageName.textContent = file.name || "Pasted screenshot";
   el.emptyDropState.hidden = true;
   el.imageState.hidden = false;
   el.clearImageBtn.hidden = false;
-  el.runOcrBtn.disabled = false;
   runOcr();
 }
 
@@ -349,7 +298,6 @@ function clearImage() {
   el.emptyDropState.hidden = false;
   el.imageState.hidden = true;
   el.clearImageBtn.hidden = true;
-  el.runOcrBtn.disabled = true;
   el.ocrStatus.hidden = true;
   el.extractionResult.hidden = true;
   el.extractedText.value = "";
@@ -367,10 +315,8 @@ async function runOcr() {
 
   const image = state.image;
   state.ocrRunning = true;
-  el.runOcrBtn.disabled = true;
   el.ocrStatus.hidden = false;
   el.ocrStatus.classList.remove("failed");
-  el.ocrHint.hidden = Boolean(ocr.paddle || ocr.worker);
   el.extractionResult.hidden = true;
   setOcrProgress(0, "Preparing screenshot…");
 
@@ -408,13 +354,11 @@ async function runOcr() {
     console.error(error);
     if (state.image === image) {
       el.ocrStatus.classList.add("failed");
-      el.ocrHint.hidden = true;
       setOcrProgress(0, "Couldn't read this screenshot. Try a tighter crop, or paste the meeting text below.");
       el.textDetails.open = true;
     }
   } finally {
     state.ocrRunning = false;
-    el.runOcrBtn.disabled = !state.image;
     if (state.ocrQueued) {
       state.ocrQueued = false;
       runOcr();
@@ -661,7 +605,6 @@ function otsuThreshold(histogram, total) {
 function setOcrProgress(percent, label) {
   const safe = Math.max(0, Math.min(100, Number(percent) || 0));
   el.ocrStatusText.textContent = label;
-  el.ocrPercent.textContent = safe ? `${safe}%` : "";
   el.progressBar.style.width = `${safe}%`;
 }
 
@@ -675,21 +618,14 @@ function readDetailsFromText(text, origin) {
     el.extractedText.focus();
     return;
   }
-  if (origin === "paste") {
-    el.extractedText.value = source;
-    el.textDetails.open = true;
-  }
+  if (origin === "paste") el.extractedText.value = source;
 
   const found = applyDetails(core.extractReminderDetails(source, BRANDS));
-  const from = origin === "screenshot" ? "the screenshot" : "the text";
   el.extractionResult.hidden = false;
-  if (found.length) {
-    el.extractionResult.innerHTML = `<p>Read from ${from}. Check each one before you copy.</p>
-      <div class="chip-row">${found.map((key) => `<span class="chip">${escapeHtml(FIELD_LABELS[key])}</span>`).join("")}</div>`;
-  } else {
-    el.extractionResult.innerHTML = `<p>No meeting details were recognised in ${from}. Fill in the details by hand, or edit the text and read it again.</p>`;
-    el.textDetails.open = true;
-  }
+  el.extractionResult.classList.toggle("is-warning", !found.length);
+  el.extractionResult.textContent = found.length
+    ? "Details filled in. Check the green fields below."
+    : "No meeting details were found. Fill in the details by hand.";
   refreshOutput();
 }
 
@@ -707,16 +643,6 @@ function applyDetails(details) {
   });
   if (applied.includes("brand")) updateRepresentativeCard();
   return applied;
-}
-
-/* The extension hands a meeting over as index.html#prefill=… */
-function applyPrefillFromHash() {
-  const details = core.decodePrefill(window.location.hash);
-  if (!details) return false;
-  applyDetails(details);
-  history.replaceState(null, "", window.location.pathname + window.location.search);
-  showToast("Meeting details loaded from the extension.");
-  return true;
 }
 
 function readForm() {
@@ -761,11 +687,11 @@ function refreshOutput() {
   el.outputStatus.classList.toggle("is-ready", Boolean(ready) && !state.outputEdited);
   let status;
   if (state.outputEdited) {
-    status = 'You edited the message, so changes to the details no longer update it. <button class="text-btn" type="button" data-action="rebuild">Rebuild from details</button>';
+    status = 'You edited the message by hand. <button class="text-btn" type="button" data-action="rebuild">Rebuild from details</button>';
   } else if (ready) {
-    status = "Ready to copy. It updates as you change the details.";
+    status = "Ready to copy.";
   } else {
-    status = `Still needed to write the reminder:
+    status = `Still needed:
       <div class="chip-row">${missing.map((key) => `<button class="chip missing" type="button" data-focus="${key}">${escapeHtml(FIELD_LABELS[key])}</button>`).join("")}</div>`;
   }
   // Only touch the DOM when the status changes: re-rendering mid-click would
@@ -782,10 +708,10 @@ function renderTicket(form, converted) {
   if (!converted) {
     el.ticketSourceLabel.textContent = "On the screenshot";
     el.ticketSourceTime.textContent = "--:--";
-    el.ticketSourceDate.textContent = "Add a date and start time";
+    el.ticketSourceDate.textContent = "\u00a0";
     el.convertedTime.textContent = "--:--";
-    el.convertedDate.textContent = " ";
-    el.conversionNote.textContent = "The reminder always uses Bangladesh Standard Time.";
+    el.convertedDate.textContent = "\u00a0";
+    el.conversionNote.hidden = true;
     return;
   }
 
@@ -805,9 +731,8 @@ function renderTicket(form, converted) {
   el.convertedTime.textContent = core.formatTimeForMessage(converted.time);
   el.convertedDate.textContent = describe(converted.date, converted.endTime, converted.endDate);
 
-  if (!converted.wasConverted) el.conversionNote.textContent = "Already in Bangladesh time, so nothing to convert.";
-  else if (converted.date !== form.date) el.conversionNote.textContent = "Note the date: in Bangladesh this meeting falls on a different day.";
-  else el.conversionNote.textContent = "Converted to Bangladesh Standard Time, with daylight saving handled for that date.";
+  el.conversionNote.hidden = !converted.wasConverted || converted.date === form.date;
+  el.conversionNote.textContent = "Note the date: in Bangladesh this meeting falls on a different day.";
 }
 
 function renderFieldHints(form) {
@@ -894,11 +819,12 @@ function resetForm() {
     field.classList.remove("autofilled");
   });
   el.textDetails.open = false;
+  el.noteDetails.open = false;
   state.outputEdited = false;
   el.shareFeedback.textContent = "";
   updateRepresentativeCard();
   refreshOutput();
-  showToast("Cleared. Your representatives are still saved.");
+  showToast("Ready for the next meeting.");
 }
 
 function flashButton(button, label) {

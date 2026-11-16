@@ -6,7 +6,7 @@ const core = globalThis.MeetingCore;
 const store = globalThis.MeetingStore;
 const capture = globalThis.MeetingCapture;
 
-const FIELDS = ["brand", "partnerBrand", "email", "date", "time", "endTime", "timezone", "meetingLink", "note"];
+const FIELDS = ["brand", "partnerBrand", "email", "date", "time", "endTime", "timezone", "meetingLink"];
 const el = {};
 const state = { meetings: [], settings: store.DEFAULT_SETTINGS, tab: null, editingId: null, sourceUrl: "", toastTimer: null };
 
@@ -15,7 +15,7 @@ document.addEventListener("DOMContentLoaded", init);
 async function init() {
   document.querySelectorAll("[id]").forEach((node) => { el[node.id] = node; });
   el.brand.replaceChildren(...store.BRANDS.map((brand) => new Option(brand, brand)));
-  el.timezone.replaceChildren(...core.orderedTimezones().map((zone) => new Option(zone.label, zone.id)));
+  el.timezone.replaceChildren(...core.orderedTimezones().map((zone) => new Option(zone.shortLabel, zone.id)));
   bindEvents();
 
   const [meetings, settings, tabs, draft] = await Promise.all([
@@ -24,12 +24,7 @@ async function init() {
   state.meetings = meetings;
   state.settings = settings;
   state.tab = tabs[0] || null;
-  el.openToolBtn.hidden = !settings.webAppUrl;
 
-  if (state.tab?.url && core.isMeetingUrl(state.tab.url)) {
-    el.tabHint.textContent = `This tab is a ${core.meetingProvider(state.tab.url)} link. Track it to keep it with its date and time.`;
-    el.tabHint.hidden = false;
-  }
   renderList();
   if (draft) openForm(draft, { captured: true });
   // Keep "starts in 5 min" labels honest while the popup stays open.
@@ -41,13 +36,12 @@ function bindEvents() {
   el.captureBtn.addEventListener("click", captureCurrentTab);
   el.addBtn.addEventListener("click", () => openForm({}));
   el.cancelBtn.addEventListener("click", showList);
+  el.deleteBtn.addEventListener("click", deleteEditedMeeting);
   el.meetingList.addEventListener("click", handleListClick);
   el.meetingForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    saveForm(false);
+    saveForm();
   });
-  el.saveCopyBtn.addEventListener("click", () => saveForm(true));
-  el.openToolBtn.addEventListener("click", openInFullTool);
   FIELDS.forEach((key) => {
     el[key].addEventListener("input", () => {
       el[key].classList.remove("autofilled", "invalid");
@@ -67,18 +61,12 @@ function renderList() {
   const todays = upcoming.filter((meeting) => dhakaDate(meeting.startUtc) === today);
   const later = upcoming.filter((meeting) => dhakaDate(meeting.startUtc) !== today);
 
-  if (!state.meetings.length) {
-    el.meetingList.innerHTML = `<div class="empty"><strong>No meetings tracked yet</strong>
-      Open an invite, booking email or calendar event, then press “Track meeting from this page”. You can also right-click any meeting link.</div>`;
-    return;
-  }
-
   const group = (title, meetings) => (meetings.length
-    ? `<h2 class="group-title">${title}</h2>${meetings.map((meeting) => meetingCard(meeting, now)).join("")}` : "");
+    ? `<h2 class="section-title">${title}</h2>${meetings.map((meeting) => meetingCard(meeting, now)).join("")}` : "");
   el.meetingList.innerHTML = [
     group("Today", todays),
     group("Coming up", later),
-    !upcoming.length ? '<div class="empty"><strong>Nothing coming up</strong>Track the next meeting from its invite or link.</div>' : "",
+    !upcoming.length ? '<div class="empty"><strong>No meetings coming up</strong>Open the invite or booking email, then press the button above.</div>' : "",
     past.length ? `<details class="past"><summary>Earlier meetings (${past.length})</summary>${past.map((meeting) => meetingCard(meeting, now)).join("")}</details>` : ""
   ].join("");
 }
@@ -93,23 +81,25 @@ function meetingCard(meeting, now) {
   let status = "";
   if (isLive) status = "<strong>Happening now</strong>";
   else if (!isPast) status = `<strong>${escapeHtml(countdown(meeting.startUtc - now))}</strong>`;
-  const sub = [status, provider ? `on ${escapeHtml(provider)}` : ""].filter(Boolean).join(" ") || escapeHtml(meeting.email);
+  // Always show where the link really goes; flag it when it is not a known meeting provider.
+  const host = linkHost(meeting.meetingLink);
+  const where = provider
+    ? `on ${escapeHtml(provider)} (${escapeHtml(host)})`
+    : `<span class="link-flag">Check link: ${escapeHtml(host || "not a web address")}</span>`;
 
   return `
-    <article class="meeting ${isLive ? "is-live" : ""} ${isPast ? "is-past" : ""}" data-id="${escapeHtml(meeting.id)}">
+    <article class="meeting ${isPast ? "is-past" : ""}" data-id="${escapeHtml(meeting.id)}">
       <div class="meeting-when">
         <span class="meeting-time">${escapeHtml(core.formatTimeForMessage(converted.time))}</span>
         <span class="meeting-date">${escapeHtml(dayLabel(converted.date, now))}</span>
       </div>
       <div class="meeting-body">
-        <div class="meeting-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
-        <div class="meeting-sub">${sub}</div>
+        <div class="meeting-title">${escapeHtml(title)}</div>
+        <div class="meeting-sub" title="${escapeHtml(meeting.meetingLink)}">${[status, where].filter(Boolean).join(" ")}</div>
         <div class="meeting-actions">
-          ${isPast ? "" : '<button class="btn btn-primary btn-small" type="button" data-action="join">Join</button>'}
-          <button class="text-btn" type="button" data-action="copy-reminder">Copy reminder</button>
-          <button class="text-btn" type="button" data-action="copy-link">Copy link</button>
+          ${isPast ? "" : '<button class="btn btn-dark btn-small" type="button" data-action="join">Join</button>'}
+          <button class="text-btn" type="button" data-action="copy">Copy reminder</button>
           <button class="text-btn" type="button" data-action="edit">Edit</button>
-          <button class="text-btn danger" type="button" data-action="delete">Delete</button>
         </div>
       </div>
     </article>`;
@@ -121,33 +111,9 @@ async function handleListClick(event) {
   const meeting = state.meetings.find((item) => item.id === button.closest("[data-id]").dataset.id);
   if (!meeting) return;
 
-  switch (button.dataset.action) {
-    case "join":
-      chrome.tabs.create({ url: meeting.meetingLink });
-      break;
-    case "copy-reminder":
-      await copyText(await store.reminderFor(meeting), meeting.email ? "Reminder copied. Paste it in Slack." : "Reminder copied. It has no email line yet.");
-      break;
-    case "copy-link":
-      await copyText(meeting.meetingLink, "Meeting link copied.");
-      break;
-    case "edit":
-      openForm(meeting, { id: meeting.id });
-      break;
-    case "delete":
-      // First click arms the button; the second one deletes.
-      if (button.dataset.armed) {
-        await store.deleteMeeting(meeting.id);
-        state.meetings = state.meetings.filter((item) => item.id !== meeting.id);
-        renderList();
-        showToast("Meeting deleted.");
-      } else {
-        button.dataset.armed = "1";
-        button.textContent = "Delete for good?";
-      }
-      break;
-    default:
-  }
+  if (button.dataset.action === "join") chrome.tabs.create({ url: meeting.meetingLink });
+  else if (button.dataset.action === "copy") await copyText(await store.reminderFor(meeting), "Reminder copied. Paste it in Slack.");
+  else openForm(meeting, { id: meeting.id });
 }
 
 /* ---------- capture ---------- */
@@ -159,7 +125,7 @@ async function captureCurrentTab() {
     openForm(await capture.captureFromTab(state.tab.id, store.BRANDS), { captured: true });
   } catch (error) {
     console.warn(error);
-    openForm({}, { warning: "Chrome doesn't let extensions read this page. Fill in the details by hand, or copy the invite text and use the right-click menu on another page." });
+    openForm({}, { warning: "Chrome doesn't allow reading this page. Fill in the details by hand." });
   } finally {
     el.captureBtn.disabled = false;
   }
@@ -182,23 +148,20 @@ function openForm(details, { id = null, captured = false, warning = "" } = {}) {
   });
 
   el.formTitle.textContent = id ? "Edit meeting" : captured ? "Check the details" : "Add a meeting";
-  el.saveBtn.textContent = id ? "Save changes" : "Save meeting";
   el.formError.hidden = true;
+  el.deleteBtn.hidden = !id;
+  el.deleteBtn.textContent = "Delete this meeting";
+  delete el.deleteBtn.dataset.armed;
 
   let hint = warning;
   let isWarning = Boolean(warning);
   if (captured) {
     const missing = [["meetingLink", "meeting link"], ["date", "date"], ["time", "start time"]]
       .filter(([key]) => !details[key]).map(([, label]) => label);
-    if (missing.length === 3) {
-      hint = "No meeting details were found here. Tip: select the invite text on the page first, then track again.";
-      isWarning = true;
-    } else if (missing.length) {
-      hint = `Found some details. Still to add: ${missing.join(", ")}.`;
-      isWarning = true;
-    } else {
-      hint = "Details found on the page. Check them, then save.";
-    }
+    if (missing.length === 3) hint = "Nothing found on this page. Select the invite text first and try again, or fill it in by hand.";
+    else if (missing.length) hint = `Still to add: ${missing.join(", ")}.`;
+    else hint = "Details found. Check them, then save.";
+    isWarning = missing.length > 0;
   }
   el.formHint.textContent = hint;
   el.formHint.hidden = !hint;
@@ -225,22 +188,24 @@ function readForm() {
 }
 
 function renderFormTicket() {
-  const converted = core.convertToDhaka(readForm());
+  const form = readForm();
+  const converted = core.convertToDhaka(form);
+  const host = linkHost(form.meetingLink);
+  el.linkWarning.hidden = !host || core.isMeetingUrl(form.meetingLink);
+  el.linkWarning.textContent = `${host} isn't a known meeting site. Check the address before you save.`;
   el.formTicket.classList.toggle("is-empty", !converted);
-  el.formTicketTime.textContent = converted
-    ? `${core.formatWeekday(converted.date)}, ${core.formatConvertedRange(converted)}`
-    : "Add a date and start time";
+  el.formTicketTime.textContent = converted ? `${core.formatWeekday(converted.date)}, ${core.formatConvertedRange(converted)}` : "--:--";
 }
 
-async function saveForm(copyReminder) {
+async function saveForm() {
   const details = readForm();
   const problems = [];
-  if (!core.cleanUrlCandidate(details.meetingLink)) problems.push(["meetingLink", "a meeting link"]);
+  if (!core.cleanUrlCandidate(details.meetingLink)) problems.push(["meetingLink", "the meeting link"]);
   if (!details.date) problems.push(["date", "the date"]);
   if (!details.time) problems.push(["time", "the start time"]);
   if (problems.length) {
     problems.forEach(([key]) => el[key].classList.add("invalid"));
-    el.formError.textContent = `Add ${problems.map(([, label]) => label).join(" and ")} to save this meeting.`;
+    el.formError.textContent = `Add ${problems.map(([, label]) => label).join(" and ")} to save.`;
     el.formError.hidden = false;
     el[problems[0][0]].focus();
     return;
@@ -254,16 +219,31 @@ async function saveForm(copyReminder) {
   }
   state.meetings = await store.getMeetings();
   showList();
-  if (copyReminder) await copyText(await store.reminderFor(meeting), "Saved, and the reminder is copied.");
-  else showToast(state.settings.notify ? `Saved. You'll get a reminder ${state.settings.leadMinutes} min before.` : "Meeting saved.");
+  showToast(state.settings.notify ? `Saved. You'll be reminded ${state.settings.leadMinutes} min before.` : "Meeting saved.");
 }
 
-function openInFullTool() {
-  const base = state.settings.webAppUrl.replace(/#.*$/, "");
-  chrome.tabs.create({ url: `${base}#${core.encodePrefill(readForm())}` });
+/* First click arms the button; the second one deletes. */
+async function deleteEditedMeeting() {
+  if (!el.deleteBtn.dataset.armed) {
+    el.deleteBtn.dataset.armed = "1";
+    el.deleteBtn.textContent = "Click again to delete for good";
+    return;
+  }
+  await store.deleteMeeting(state.editingId);
+  state.meetings = await store.getMeetings();
+  showList();
+  showToast("Meeting deleted.");
 }
 
 /* ---------- helpers ---------- */
+
+function linkHost(link) {
+  try {
+    return new URL(link).hostname.replace(/^www\./i, "");
+  } catch (error) {
+    return "";
+  }
+}
 
 function dhakaDate(timestamp) {
   return core.formatDateTimeInZone(new Date(timestamp), core.TARGET_ZONE).date;
@@ -291,7 +271,7 @@ async function copyText(text, message) {
     await navigator.clipboard.writeText(text);
     showToast(message);
   } catch (error) {
-    showToast("Couldn't copy. Click inside the popup and try again.");
+    showToast("Couldn't copy. Click inside this window and try again.");
   }
 }
 

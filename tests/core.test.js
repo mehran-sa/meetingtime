@@ -63,7 +63,6 @@ test("time zones", () => {
   assert.equal(core.extractTimezone("(GMT+06:00) Bangladesh Standard Time"), "Asia/Dhaka");
   assert.equal(core.extractTimezone("10:00 GMT"), "Europe/London");
   assert.equal(core.extractTimezone("10:00 GMT+6"), "Asia/Dhaka");
-  assert.equal(core.extractTimezone("9am Eastern Time"), "America/New_York");
   assert.equal(core.extractTimezone("10:00 BST"), "");
   assert.equal(core.extractTimezone("nothing here"), "");
 });
@@ -94,8 +93,6 @@ test("Dhaka times pass through and overnight ends roll over", () => {
   assert.equal(`${same.date} ${same.time} ${same.endDate} ${same.endTime}`, "2026-11-17 23:30 2026-11-18 00:30");
   assert.equal(same.startUtc, Date.UTC(2026, 10, 17, 17, 30));
   assert.equal(core.convertToDhaka({ date: "", time: "10:00" }), null);
-  const ny = core.convertToDhaka({ date: "2026-11-17", time: "09:00", timezone: "America/New_York" });
-  assert.equal(`${ny.date} ${ny.time}`, "2026-11-17 20:00");
 });
 
 test("reminder message keeps the team format", () => {
@@ -114,11 +111,8 @@ test("reminder message keeps the team format", () => {
   assert.equal(core.buildGreeting({}), "Assalamu Alaikum bhai,");
 });
 
-test("missing fields and prefill round trip", () => {
+test("missing fields", () => {
   assert.deepEqual(core.findMissingFields({ email: "", date: "2026-11-17", time: "", meetingLink: "x" }), ["email", "time"]);
-  const details = { brand: "HF Online", date: "2026-11-17", time: "14:00", timezone: "Europe/London", meetingLink: "https://zoom.us/j/1?a=b&c=d" };
-  assert.deepEqual(core.decodePrefill(`#${core.encodePrefill(details)}`), details);
-  assert.equal(core.decodePrefill("#prefill=%7Bbroken"), null);
 });
 
 test("extension copies of shared files are in sync", () => {

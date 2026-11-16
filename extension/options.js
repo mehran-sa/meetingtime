@@ -1,6 +1,6 @@
 "use strict";
 
-/* Settings page: reminders, the web tool address and brand representatives. */
+/* Settings page: reminders, brand representatives and stored meetings. */
 
 const core = globalThis.MeetingCore;
 const store = globalThis.MeetingStore;
@@ -10,8 +10,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   const [settings, reps] = await Promise.all([store.getSettings(), store.getRepresentatives()]);
   $("notify").checked = settings.notify;
   selectClosest($("leadMinutes"), settings.leadMinutes);
-  selectClosest($("keepPastDays"), settings.keepPastDays);
-  $("webAppUrl").value = settings.webAppUrl;
 
   $("repRows").replaceChildren(...store.BRANDS.map((brand) => {
     const row = document.createElement("tr");
@@ -21,7 +19,29 @@ document.addEventListener("DOMContentLoaded", async () => {
   }));
 
   $("optionsForm").addEventListener("submit", save);
+  $("deleteAllBtn").addEventListener("click", deleteAll);
+  showMeetingCount();
 });
+
+async function showMeetingCount() {
+  const count = (await store.getMeetings()).length;
+  $("meetingCount").textContent = count ? `${count} meeting${count === 1 ? "" : "s"} stored` : "No meetings stored";
+  $("deleteAllBtn").disabled = !count;
+}
+
+/* First click arms the button; the second one deletes. */
+async function deleteAll() {
+  const button = $("deleteAllBtn");
+  if (!button.dataset.armed) {
+    button.dataset.armed = "1";
+    button.textContent = "Click again to delete all";
+    return;
+  }
+  await store.deleteAllMeetings();
+  delete button.dataset.armed;
+  button.textContent = "Delete all meetings";
+  showMeetingCount();
+}
 
 function cell(content) {
   const td = document.createElement("td");
@@ -56,12 +76,7 @@ async function save(event) {
     };
   });
   await Promise.all([
-    store.saveSettings({
-      notify: $("notify").checked,
-      leadMinutes: Number($("leadMinutes").value),
-      keepPastDays: Number($("keepPastDays").value),
-      webAppUrl: $("webAppUrl").value.trim()
-    }),
+    store.saveSettings({ notify: $("notify").checked, leadMinutes: Number($("leadMinutes").value) }),
     store.saveRepresentatives(representatives)
   ]);
   $("saveStatus").textContent = "Settings saved.";
