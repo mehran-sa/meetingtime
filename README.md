@@ -17,6 +17,13 @@ Open `index.html` through any static server (for example `npx serve .`), or use 
 
 If you edit the message by hand, it stops following the form until you press "Rebuild from details".
 
+### Screenshot reading speed
+
+- The text reader loads in the background as soon as the page opens, so the first screenshot doesn't wait for downloads.
+- It runs on the graphics card (WebGPU) where the browser supports it and falls back to WASM elsewhere.
+- Small screenshots are enlarged to 1400 px wide (was 2200 px); larger ones are read at their own size.
+- The form fills as soon as the first read finishes. Tesseract only runs afterwards, in the background, when the date, time or link is still missing.
+
 ## Chrome extension
 
 ### Install

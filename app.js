@@ -12,9 +12,20 @@ const BRANDS = BRAND_CONFIG.map((item) => String(item.brand || "").trim()).filte
 const STORAGE_KEY = "slack-message-generator-representatives-v1";
 const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/tesseract.min.js";
 const PADDLE_OCR_MODULE_URL = "https://cdn.jsdelivr.net/npm/@paddleocr/paddleocr-js@0.4.2/+esm";
-const ONNX_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
 const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
 const GOOD_OCR_SCORE = 15;
+// Small screenshots are enlarged to this width before reading. Measured in Chrome:
+// 1400 px reads as accurately as the old 2200 px in less than half the time.
+const OCR_TARGET_WIDTH = 1400;
+const OCR_PREDICT_OPTIONS = {
+  textDetLimitSideLen: 1280,
+  textDetLimitType: "max",
+  textDetMaxSideLimit: 3200,
+  textDetThresh: 0.25,
+  textDetBoxThresh: 0.45,
+  textDetUnclipRatio: 1.6,
+  textRecScoreThresh: 0.25
+};
 
 /* Form fields that feed the reminder, keyed by the name core.js uses. */
 const FIELD_IDS = {
@@ -50,7 +61,7 @@ const state = {
   statusHtml: "",
   toastTimer: null
 };
-const ocr = { worker: null, workerPromise: null, paddle: null, paddlePromise: null, paddleUnavailable: false, tesseractScript: null };
+const ocr = { worker: null, workerPromise: null, paddle: null, paddlePromise: null, paddleUnavailable: false, queue: Promise.resolve(), scanned: false, tesseractScript: null };
 
 window.addEventListener("DOMContentLoaded", init);
 
@@ -67,6 +78,7 @@ function init() {
   updateShareButtonLabel();
   updateRepresentativeCard();
   refreshOutput();
+  scheduleOcrWarmUp();
 }
 
 /* ---------- events ---------- */
@@ -305,6 +317,12 @@ function clearImage() {
 
 /* ---------- OCR ---------- */
 
+/*
+ * Reading a screenshot happens in two stages so the form fills as early as possible:
+ *   1. PaddleOCR reads the image and the details go straight into the form.
+ *   2. Only if the date, time or link is still missing, Tesseract takes a second
+ *      look in the background and fills the gaps.
+ */
 async function runOcr() {
   if (!state.image) return;
   if (state.ocrRunning) {
@@ -314,51 +332,61 @@ async function runOcr() {
   }
 
   const image = state.image;
+  const isCurrent = () => state.image === image;
   state.ocrRunning = true;
   el.ocrStatus.hidden = false;
   el.ocrStatus.classList.remove("failed");
   el.extractionResult.hidden = true;
-  setOcrProgress(0, "Preparing screenshot…");
+  setOcrProgress(10, "Reading the screenshot…");
 
   try {
-    const prepared = await prepareOcrImages(image);
-    const candidates = [];
-
+    const color = await prepareOcrImage(image);
+    let firstText = "";
     try {
-      setOcrProgress(8, "Loading the text reader…");
-      const paddleText = await recognizeWithPaddleOcr(prepared.color);
-      if (paddleText) candidates.push(paddleText);
+      firstText = core.cleanText(await recognizeWithPaddleOcr(color));
     } catch (error) {
       ocr.paddleUnavailable = true;
       console.warn("PaddleOCR was unavailable; using Tesseract instead.", error);
     }
+    if (!isCurrent()) return;
 
-    const paddleBest = selectBestOcrText(candidates);
-    if (!paddleBest || core.scoreOcrText(paddleBest, BRANDS) < GOOD_OCR_SCORE) {
-      setOcrProgress(58, paddleBest ? "Double-checking missed details…" : "Reading the screenshot…");
-      candidates.push(...(await recognizeWithTesseract(prepared)).filter(Boolean));
+    let firstDetails = null;
+    let snapshot = null;
+    if (firstText) {
+      el.extractedText.value = firstText;
+      firstDetails = core.extractReminderDetails(firstText, BRANDS);
+      readDetailsFromText(firstText, "screenshot");
+      snapshot = readForm();
+      if (firstDetails.date && firstDetails.time && firstDetails.meetingLink) {
+        setOcrProgress(100, "Screenshot read");
+        return;
+      }
     }
 
-    const best = selectBestOcrText(candidates);
+    // Second look: the form is already usable, so this only fills what is missing.
+    setOcrProgress(60, firstText ? "Double-checking the missing details…" : "Reading the screenshot…");
+    const secondTexts = await recognizeWithTesseract(color, firstText);
+    if (!isCurrent()) return;
+    const best = selectBestOcrText([firstText, ...secondTexts]);
     if (!best) throw new Error("No text was recognised.");
-    if (state.image !== image) return; // replaced or removed while scanning
 
-    const text = core.cleanText(buildOcrConsensusText(candidates, best));
+    const text = core.cleanText(buildOcrConsensusText([firstText, ...secondTexts].filter(Boolean), best));
     el.extractedText.value = text;
+    if (firstDetails) fillGaps(core.extractReminderDetails(text, BRANDS), firstDetails, snapshot);
+    else readDetailsFromText(text, "screenshot");
     setOcrProgress(100, "Screenshot read");
-    readDetailsFromText(text, "screenshot");
-    window.setTimeout(() => {
-      if (!state.ocrRunning) el.ocrStatus.hidden = true;
-    }, 1200);
   } catch (error) {
     console.error(error);
-    if (state.image === image) {
+    if (isCurrent()) {
       el.ocrStatus.classList.add("failed");
       setOcrProgress(0, "Couldn't read this screenshot. Try a tighter crop, or paste the meeting text below.");
       el.textDetails.open = true;
     }
   } finally {
     state.ocrRunning = false;
+    if (isCurrent() && !el.ocrStatus.classList.contains("failed")) {
+      window.setTimeout(() => { if (!state.ocrRunning) el.ocrStatus.hidden = true; }, 900);
+    }
     if (state.ocrQueued) {
       state.ocrQueued = false;
       runOcr();
@@ -366,20 +394,34 @@ async function runOcr() {
   }
 }
 
-async function recognizeWithPaddleOcr(imageCanvas) {
-  const engine = await getPaddleOcr();
-  setOcrProgress(28, "Finding the text…");
-  const [result] = await engine.predict(imageCanvas, {
-    textDetLimitSideLen: 1920,
-    textDetLimitType: "max",
-    textDetMaxSideLimit: 3200,
-    textDetThresh: 0.25,
-    textDetBoxThresh: 0.45,
-    textDetUnclipRatio: 1.6,
-    textRecScoreThresh: 0.25
+/* Apply second-pass details only to fields the first pass left empty and nobody has touched since. */
+function fillGaps(details, firstDetails, snapshot) {
+  const current = readForm();
+  const gaps = {};
+  Object.keys(FIELD_IDS).forEach((key) => {
+    if (details[key] && !firstDetails[key] && current[key] === snapshot[key]) gaps[key] = details[key];
   });
-  setOcrProgress(54, "Reading the meeting details…");
+  if (!Object.keys(gaps).length) return;
+  applyDetails(gaps);
+  el.extractionResult.hidden = false;
+  el.extractionResult.classList.remove("is-warning");
+  el.extractionResult.textContent = "Details filled in. Check the green fields below.";
+  refreshOutput();
+}
+
+async function recognizeWithPaddleOcr(imageCanvas) {
+  ocr.scanned = true;
+  const engine = await getPaddleOcr();
+  setOcrProgress(40, "Reading the screenshot…");
+  const [result] = await predictInTurn(engine, imageCanvas);
   return core.formatPaddleOcrItems(result?.items || []);
+}
+
+/* The engine can only run one prediction at a time, so every call waits for the one before it. */
+function predictInTurn(engine, canvas) {
+  const run = ocr.queue.then(() => engine.predict(canvas, OCR_PREDICT_OPTIONS));
+  ocr.queue = run.catch(() => undefined);
+  return run;
 }
 
 function getPaddleOcr() {
@@ -387,11 +429,9 @@ function getPaddleOcr() {
   if (ocr.paddleUnavailable) return Promise.reject(new Error("PaddleOCR is disabled for this session."));
   if (!ocr.paddlePromise) {
     ocr.paddlePromise = import(PADDLE_OCR_MODULE_URL)
-      .then(({ PaddleOCR }) => PaddleOCR.create({
-        lang: "en",
-        ocrVersion: "PP-OCRv6",
-        ortOptions: { backend: "wasm", wasmPaths: ONNX_WASM_PATH, numThreads: 1, simd: true }
-      }))
+      // "auto" runs on the graphics card (WebGPU) where the browser supports it,
+      // which is several times faster, and falls back to WASM everywhere else.
+      .then(({ PaddleOCR }) => PaddleOCR.create({ lang: "en", ocrVersion: "PP-OCRv6", ortOptions: { backend: "auto" } }))
       .then((instance) => {
         ocr.paddle = instance;
         return instance;
@@ -404,19 +444,47 @@ function getPaddleOcr() {
   return ocr.paddlePromise;
 }
 
-async function recognizeWithTesseract(prepared) {
+/*
+ * Load the text reader as soon as the page is idle and run it once on a tiny
+ * image, so the first real screenshot doesn't wait for downloads and start-up.
+ */
+function scheduleOcrWarmUp() {
+  const start = () => {
+    getPaddleOcr()
+      .then((engine) => {
+        if (ocr.scanned) return null; // a real screenshot got there first and warms it up itself
+        const canvas = document.createElement("canvas");
+        canvas.width = 320;
+        canvas.height = 96;
+        const context = canvas.getContext("2d");
+        context.fillStyle = "#fff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillStyle = "#000";
+        context.font = "28px Arial";
+        context.fillText("Meeting 12:30", 16, 58);
+        return predictInTurn(engine, canvas);
+      })
+      .catch((error) => console.warn("Text reader warm-up failed; it will load on first use.", error));
+  };
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(start, { timeout: 2500 });
+  else window.setTimeout(start, 800);
+}
+
+/* Second look with Tesseract. A high-contrast pass is added only if the first one is still weak. */
+async function recognizeWithTesseract(color, firstText) {
   const worker = await getTesseractWorker();
   const outputs = [];
 
   await worker.setParameters({ tessedit_pageseg_mode: "3", preserve_interword_spaces: "1", user_defined_dpi: "300" });
-  outputs.push(core.cleanText((await worker.recognize(prepared.enhanced)).data.text));
+  outputs.push(core.cleanText((await worker.recognize(toTextCanvas(color, false))).data.text));
 
-  if (core.scoreOcrText(outputs[0], BRANDS) < GOOD_OCR_SCORE) {
-    setOcrProgress(82, "Trying a high-contrast pass…");
+  const bestSoFar = selectBestOcrText([firstText, outputs[0]]);
+  if (core.scoreOcrText(bestSoFar, BRANDS) < GOOD_OCR_SCORE) {
+    setOcrProgress(85, "Trying a high-contrast pass…");
     await worker.setParameters({ tessedit_pageseg_mode: "6", preserve_interword_spaces: "1", user_defined_dpi: "300" });
-    outputs.push(core.cleanText((await worker.recognize(prepared.binary)).data.text));
+    outputs.push(core.cleanText((await worker.recognize(toTextCanvas(color, true))).data.text));
   }
-  return outputs;
+  return outputs.filter(Boolean);
 }
 
 /* Tesseract is only downloaded if PaddleOCR fails or misses details. */
@@ -452,7 +520,7 @@ async function getTesseractWorker() {
     ocr.workerPromise = window.Tesseract.createWorker("eng", 1, {
       logger: (message) => {
         if (typeof message.progress !== "number" || !state.ocrRunning) return;
-        setOcrProgress(58 + Math.round(message.progress * 34), labels[message.status] || "Reading the screenshot…");
+        setOcrProgress(60 + Math.round(message.progress * 30), labels[message.status] || "Double-checking the missing details…");
       }
     }).then((worker) => {
       ocr.worker = worker;
@@ -497,12 +565,13 @@ function buildOcrConsensusText(texts, bestText) {
   return extra.length ? `${baseText}\n\nAlso found on a second pass\n${extra.join("\n")}` : baseText;
 }
 
-async function prepareOcrImages(file) {
+/* Draw the screenshot onto a canvas, enlarging small ones so the text is sharp enough to read. */
+async function prepareOcrImage(file) {
   const source = await loadImageSource(file);
   const width = source.width || source.naturalWidth;
   const height = source.height || source.naturalHeight;
-  // Upscale small screenshots for sharper text, but cap the canvas so phones don't run out of memory.
-  const scale = Math.min(3, Math.max(1, 2200 / Math.max(1, width)), 4200 / Math.max(1, width, height));
+  // Never shrink (detail would be lost); cap the canvas so phones don't run out of memory.
+  const scale = Math.min(2.5, Math.max(1, OCR_TARGET_WIDTH / Math.max(1, width)), 4200 / Math.max(1, width, height));
 
   const color = document.createElement("canvas");
   color.width = Math.max(1, Math.round(width * scale));
@@ -512,8 +581,7 @@ async function prepareOcrImages(file) {
   context.imageSmoothingQuality = "high";
   context.drawImage(source, 0, 0, color.width, color.height);
   if (typeof source.close === "function") source.close();
-
-  return { color, enhanced: toTextCanvas(color, false), binary: toTextCanvas(color, true) };
+  return color;
 }
 
 function loadImageSource(file) {
