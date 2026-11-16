@@ -1,0 +1,10 @@
+{
+  "name": "meetingtime",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Slack Reminder Generator web app and Meeting Tracker Chrome extension",
+  "scripts": {
+    "test": "node --test tests/core.test.js",
+    "sync": "node scripts/sync-extension.js"
+  }
+}

@@ -1,0 +1,3 @@
+Epilogue (Etcetera Type Co) and Poppins (Indian Type Foundry) are licensed under
+the SIL Open Font License 1.1: https://openfontlicense.org
+The .woff2 files here are the Latin subsets distributed by Fontsource.

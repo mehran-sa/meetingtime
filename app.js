@@ -1,243 +1,285 @@
 "use strict";
 
+/*
+ * Web app UI. All parsing, time conversion and message building lives in
+ * core.js (window.MeetingCore); this file only wires it to the page.
+ */
+
+const core = window.MeetingCore;
 const BRAND_CONFIG = Array.isArray(window.BRAND_CONFIG) ? window.BRAND_CONFIG : [];
 const BRANDS = BRAND_CONFIG.map((item) => String(item.brand || "").trim()).filter(Boolean);
+
 const STORAGE_KEY = "slack-message-generator-representatives-v1";
+const TESSERACT_URL = "https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/tesseract.min.js";
 const PADDLE_OCR_MODULE_URL = "https://cdn.jsdelivr.net/npm/@paddleocr/paddleocr-js@0.4.2/+esm";
 const ONNX_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
-const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const MONTH_LOOKUP = {
-  jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3,
-  apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,
-  aug: 8, august: 8, sep: 9, sept: 9, september: 9, oct: 10,
-  october: 10, nov: 11, november: 11, dec: 12, december: 12
+const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+const GOOD_OCR_SCORE = 15;
+
+/* Form fields that feed the reminder, keyed by the name core.js uses. */
+const FIELD_IDS = {
+  brand: "brandSelect",
+  partnerBrand: "partnerBrandInput",
+  email: "emailInput",
+  date: "sourceDate",
+  time: "sourceTime",
+  endTime: "sourceEndTime",
+  timezone: "sourceTimezone",
+  meetingLink: "meetingLinkInput",
+  note: "additionalNote"
+};
+const FIELD_LABELS = {
+  brand: "brand",
+  partnerBrand: "partner brand",
+  email: "email",
+  date: "date",
+  time: "start time",
+  endTime: "end time",
+  timezone: "time zone",
+  meetingLink: "meeting link"
 };
 
-const elements = {};
-let currentImage = null;
-let representatives = loadRepresentatives();
-let settingsSnapshot = null;
-let toastTimer = null;
-let isOcrRunning = false;
-let ocrWorker = null;
-let ocrWorkerPromise = null;
-let paddleOcr = null;
-let paddleOcrPromise = null;
-let paddleOcrUnavailable = false;
+const el = {};
+const state = {
+  image: null,
+  representatives: {},
+  ocrRunning: false,
+  ocrQueued: false,
+  outputEdited: false,
+  lastGenerated: "",
+  statusHtml: "",
+  toastTimer: null
+};
+const ocr = { worker: null, workerPromise: null, paddle: null, paddlePromise: null, paddleUnavailable: false, tesseractScript: null };
 
 window.addEventListener("DOMContentLoaded", init);
 
 function init() {
-  cacheElements();
-  populateBrands();
-  renderRepresentativeRows();
-  bindEvents();
-  updateRepresentativeCard();
-  updateConversionPreview();
-  updateCopyState();
+  document.querySelectorAll("[id]").forEach((node) => { el[node.id] = node; });
+  state.representatives = loadRepresentatives();
+
+  el.brandSelect.replaceChildren(...BRANDS.map((brand) => new Option(brand, brand)));
+  el.sourceTimezone.replaceChildren(...core.orderedTimezones().map((zone) => new Option(zone.label, zone.id)));
+
+  bindImageEvents();
+  bindFormEvents();
+  bindSettingsEvents();
   updateShareButtonLabel();
+  updateRepresentativeCard();
+  applyPrefillFromHash();
+  refreshOutput();
 }
 
-function cacheElements() {
-  [
-    "openSettingsBtn", "settingsDialog", "settingsForm", "closeSettingsBtn", "cancelSettingsBtn",
-    "clearSettingsBtn", "representativeRows", "dropZone", "fileInput", "uploadBtn", "pasteBtn",
-    "replaceImageBtn", "clearImageBtn", "emptyDropState", "imageState", "previewImage", "imageName",
-    "ocrStatus", "ocrStatusText", "ocrPercent", "progressBar", "extractionResult", "runOcrBtn",
-    "fetchDetailsBtn", "extractedText", "brandSelect", "representativeName", "representativeMention",
-    "editCurrentRepBtn", "partnerBrandInput", "emailInput", "sourceDate", "sourceTime", "sourceEndTime", "sourceTimezone", "conversionCard",
-    "convertedDateTime", "conversionNote", "meetingLinkInput", "additionalNote", "generateBtn",
-    "outputMessage", "copyBtn", "copyFeedback", "shareSlackBtn", "shareFeedback", "resetBtn", "toast"
-  ].forEach((id) => { elements[id] = document.getElementById(id); });
-}
+/* ---------- events ---------- */
 
-function bindEvents() {
-  elements.uploadBtn.addEventListener("click", (event) => {
+function bindImageEvents() {
+  const openPicker = (event) => {
     event.stopPropagation();
-    elements.fileInput.click();
+    el.fileInput.click();
+  };
+  el.uploadBtn.addEventListener("click", openPicker);
+  el.replaceImageBtn.addEventListener("click", openPicker);
+  el.dropZone.addEventListener("click", (event) => {
+    if (!event.target.closest("button")) el.fileInput.click();
   });
-  elements.replaceImageBtn.addEventListener("click", (event) => {
-    event.stopPropagation();
-    elements.fileInput.click();
+  el.dropZone.addEventListener("keydown", (event) => {
+    if (event.target !== el.dropZone || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    el.fileInput.click();
   });
-  elements.dropZone.addEventListener("click", (event) => {
-    if (!event.target.closest("button")) elements.fileInput.click();
-  });
-  elements.dropZone.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      elements.fileInput.click();
-    }
-  });
-  elements.fileInput.addEventListener("change", () => {
-    const file = elements.fileInput.files?.[0];
+  el.fileInput.addEventListener("change", () => {
+    const file = el.fileInput.files?.[0];
     if (file) handleImageFile(file);
-    elements.fileInput.value = "";
+    el.fileInput.value = "";
   });
-  elements.pasteBtn.addEventListener("click", async (event) => {
+  el.pasteBtn.addEventListener("click", (event) => {
     event.stopPropagation();
-    await pasteImageFromClipboard();
+    pasteFromClipboard();
   });
   document.addEventListener("paste", handlePasteEvent);
 
-  ["dragenter", "dragover"].forEach((eventName) => {
-    elements.dropZone.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      elements.dropZone.classList.add("dragging");
-    });
+  // Accept a drop anywhere on the page, not only on the drop zone.
+  let dragDepth = 0;
+  const hasFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files");
+  document.addEventListener("dragenter", (event) => {
+    if (!hasFiles(event)) return;
+    dragDepth += 1;
+    el.dropZone.classList.add("dragging");
   });
-  ["dragleave", "drop"].forEach((eventName) => {
-    elements.dropZone.addEventListener(eventName, (event) => {
-      event.preventDefault();
-      elements.dropZone.classList.remove("dragging");
-    });
+  document.addEventListener("dragover", (event) => {
+    if (hasFiles(event)) event.preventDefault();
   });
-  elements.dropZone.addEventListener("drop", (event) => {
+  document.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) el.dropZone.classList.remove("dragging");
+  });
+  document.addEventListener("drop", (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth = 0;
+    el.dropZone.classList.remove("dragging");
     const file = [...event.dataTransfer.files].find((candidate) => candidate.type.startsWith("image/"));
     if (file) handleImageFile(file);
-    else showToast("Please drop a valid image file.");
+    else showToast("That file is not an image. Drop a PNG, JPG or WebP screenshot.");
   });
 
-  elements.clearImageBtn.addEventListener("click", clearImage);
-  elements.runOcrBtn.addEventListener("click", runOcr);
-  elements.fetchDetailsBtn.addEventListener("click", () => extractAndApplyDetails(elements.extractedText.value, true));
-
-  elements.brandSelect.addEventListener("change", updateRepresentativeCard);
-  elements.editCurrentRepBtn.addEventListener("click", () => openSettings(elements.brandSelect.value));
-  [elements.sourceDate, elements.sourceTime, elements.sourceEndTime, elements.sourceTimezone].forEach((element) => {
-    element.addEventListener("input", updateConversionPreview);
-    element.addEventListener("change", updateConversionPreview);
-  });
-
-  elements.generateBtn.addEventListener("click", generateReminder);
-  elements.outputMessage.addEventListener("input", updateCopyState);
-  elements.copyBtn.addEventListener("click", copyOutput);
-  elements.shareSlackBtn.addEventListener("click", shareToSlack);
-  elements.resetBtn.addEventListener("click", resetForm);
-
-
-  elements.openSettingsBtn.addEventListener("click", () => openSettings());
-  elements.closeSettingsBtn.addEventListener("click", closeSettingsWithoutSaving);
-  elements.cancelSettingsBtn.addEventListener("click", closeSettingsWithoutSaving);
-  elements.clearSettingsBtn.addEventListener("click", clearRepresentativeInputs);
-  elements.settingsForm.addEventListener("submit", saveRepresentativeSettings);
-  elements.settingsDialog.addEventListener("cancel", (event) => {
-    event.preventDefault();
-    closeSettingsWithoutSaving();
-  });
+  el.clearImageBtn.addEventListener("click", clearImage);
+  el.runOcrBtn.addEventListener("click", runOcr);
+  el.fetchDetailsBtn.addEventListener("click", () => readDetailsFromText(el.extractedText.value, "text"));
 }
 
-function populateBrands() {
-  elements.brandSelect.innerHTML = BRANDS
-    .map((brand) => `<option value="${escapeHtml(brand)}">${escapeHtml(brand)}</option>`)
-    .join("");
-}
-
-function defaultRepresentatives() {
-  return Object.fromEntries(BRAND_CONFIG.map((item) => [
-    String(item.brand || "").trim(),
-    {
-      name: String(item.representativeName || "").trim(),
-      slackId: normalizeSlackId(item.slackId || "")
+function bindFormEvents() {
+  Object.values(FIELD_IDS).forEach((id) => {
+    const field = el[id];
+    const onEdit = () => {
+      field.classList.remove("autofilled");
+      refreshOutput();
+    };
+    field.addEventListener("input", onEdit);
+    field.addEventListener("change", onEdit);
+  });
+  el.brandSelect.addEventListener("change", updateRepresentativeCard);
+  el.editCurrentRepBtn.addEventListener("click", () => openSettings(el.brandSelect.value));
+  el.meetingLinkInput.addEventListener("blur", () => {
+    const value = el.meetingLinkInput.value.trim();
+    // People often paste "meet.google.com/…" without the scheme.
+    if (value && !/^https?:\/\//i.test(value) && /^[^\s/]+\.[^\s/]+/.test(value)) {
+      el.meetingLinkInput.value = `https://${value}`;
+      refreshOutput();
     }
-  ]));
+  });
+
+  el.outputMessage.addEventListener("input", () => {
+    state.outputEdited = el.outputMessage.value.trim() !== "" && el.outputMessage.value !== state.lastGenerated;
+    refreshOutput();
+  });
+  el.outputStatus.addEventListener("click", (event) => {
+    const target = event.target.closest("[data-focus], [data-action]");
+    if (!target) return;
+    if (target.dataset.action === "rebuild") {
+      state.outputEdited = false;
+      refreshOutput();
+    } else {
+      focusField(target.dataset.focus);
+    }
+  });
+  el.copyBtn.addEventListener("click", copyOutput);
+  el.shareSlackBtn.addEventListener("click", shareToSlack);
+  el.resetBtn.addEventListener("click", resetForm);
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !el.copyBtn.disabled && !el.settingsDialog.open) {
+      event.preventDefault();
+      copyOutput();
+    }
+  });
+  window.addEventListener("hashchange", () => {
+    if (applyPrefillFromHash()) refreshOutput();
+  });
 }
+
+function bindSettingsEvents() {
+  el.openSettingsBtn.addEventListener("click", () => openSettings());
+  el.closeSettingsBtn.addEventListener("click", () => el.settingsDialog.close());
+  el.cancelSettingsBtn.addEventListener("click", () => el.settingsDialog.close());
+  el.clearSettingsBtn.addEventListener("click", () => {
+    el.representativeRows.querySelectorAll("input").forEach((input) => { input.value = ""; });
+  });
+  el.settingsSearch.addEventListener("input", filterRepresentativeRows);
+  el.settingsForm.addEventListener("submit", saveRepresentativeSettings);
+  // Clicking the dimmed backdrop closes the dialog without saving.
+  el.settingsDialog.addEventListener("click", (event) => {
+    if (event.target === el.settingsDialog) el.settingsDialog.close();
+  });
+}
+
+/* ---------- representatives ---------- */
 
 function loadRepresentatives() {
-  const defaults = defaultRepresentatives();
+  const reps = Object.fromEntries(BRAND_CONFIG.map((item) => [
+    String(item.brand || "").trim(),
+    { name: String(item.representativeName || "").trim(), slackId: core.normalizeSlackId(item.slackId) }
+  ]));
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
     BRANDS.forEach((brand) => {
       if (!Object.prototype.hasOwnProperty.call(saved, brand)) return;
-      defaults[brand] = {
+      reps[brand] = {
         name: String(saved[brand]?.name || "").trim(),
-        slackId: normalizeSlackId(saved[brand]?.slackId || "")
+        slackId: core.normalizeSlackId(saved[brand]?.slackId)
       };
     });
   } catch (error) {
     console.warn("Could not load representative settings.", error);
   }
-  return defaults;
+  return reps;
 }
 
-function renderRepresentativeRows() {
-  elements.representativeRows.innerHTML = BRANDS.map((brand) => {
-    const rep = representatives[brand] || { name: "", slackId: "" };
-    return `
-      <tr data-brand="${escapeHtml(brand)}">
-        <td>${escapeHtml(brand)}</td>
-        <td><input type="text" data-field="name" value="${escapeHtml(rep.name)}" placeholder="Representative name" /></td>
-        <td><input type="text" data-field="slackId" value="${escapeHtml(rep.slackId)}" placeholder="U012AB3CD" /></td>
-      </tr>`;
-  }).join("");
+function currentRepresentative() {
+  return state.representatives[el.brandSelect.value] || { name: "", slackId: "" };
+}
+
+function updateRepresentativeCard() {
+  const rep = currentRepresentative();
+  el.representativeName.textContent = rep.name || (rep.slackId ? `<@${rep.slackId}>` : "Not set");
+  if (rep.slackId) el.representativeMention.textContent = "Greeting will @mention them in Slack";
+  else if (rep.name) el.representativeMention.textContent = `Greeting will say “${rep.name} bhai”`;
+  else el.representativeMention.textContent = "Greeting will say “bhai”";
+  el.editCurrentRepBtn.textContent = rep.name || rep.slackId ? "Change" : "Set";
 }
 
 function openSettings(focusBrand = "") {
-  settingsSnapshot = JSON.stringify(representatives);
-  renderRepresentativeRows();
-  elements.settingsDialog.showModal();
-  if (focusBrand) {
-    requestAnimationFrame(() => {
-      const row = [...elements.representativeRows.querySelectorAll("tr")]
-        .find((item) => item.dataset.brand === focusBrand);
-      row?.scrollIntoView({ block: "center" });
-      row?.querySelector('[data-field="name"]')?.focus();
-    });
-  }
+  el.settingsSearch.value = "";
+  el.representativeRows.innerHTML = BRANDS.map((brand) => {
+    const rep = state.representatives[brand] || { name: "", slackId: "" };
+    return `
+      <tr data-brand="${escapeHtml(brand)}">
+        <td>${escapeHtml(brand)}</td>
+        <td><input type="text" data-field="name" value="${escapeHtml(rep.name)}" placeholder="Name" aria-label="Representative for ${escapeHtml(brand)}" /></td>
+        <td><input type="text" data-field="slackId" value="${escapeHtml(rep.slackId)}" placeholder="U012AB3CD" aria-label="Slack member ID for ${escapeHtml(brand)}" /></td>
+      </tr>`;
+  }).join("");
+  el.settingsDialog.showModal();
+  if (!focusBrand) return;
+  const row = [...el.representativeRows.rows].find((item) => item.dataset.brand === focusBrand);
+  if (!row) return;
+  row.classList.add("is-focus");
+  row.scrollIntoView({ block: "center" });
+  row.querySelector('[data-field="name"]').focus();
 }
 
-function closeSettingsWithoutSaving() {
-  if (settingsSnapshot) representatives = JSON.parse(settingsSnapshot);
-  settingsSnapshot = null;
-  elements.settingsDialog.close();
-  updateRepresentativeCard();
-}
-
-function clearRepresentativeInputs() {
-  elements.representativeRows.querySelectorAll("input").forEach((input) => { input.value = ""; });
+function filterRepresentativeRows() {
+  const query = core.normalizeSearchText(el.settingsSearch.value);
+  [...el.representativeRows.rows].forEach((row) => {
+    row.hidden = Boolean(query) && !core.normalizeSearchText(row.dataset.brand).includes(query);
+  });
 }
 
 function saveRepresentativeSettings(event) {
   event.preventDefault();
   const next = {};
-  elements.representativeRows.querySelectorAll("tr").forEach((row) => {
+  [...el.representativeRows.rows].forEach((row) => {
     next[row.dataset.brand] = {
       name: row.querySelector('[data-field="name"]').value.trim(),
-      slackId: normalizeSlackId(row.querySelector('[data-field="slackId"]').value)
+      slackId: core.normalizeSlackId(row.querySelector('[data-field="slackId"]').value)
     };
   });
-  representatives = next;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  settingsSnapshot = null;
-  elements.settingsDialog.close();
-  updateRepresentativeCard();
-  showToast("Representative settings saved.");
-}
-
-function normalizeSlackId(value) {
-  return String(value || "")
-    .trim()
-    .replace(/^<@/, "")
-    .replace(/>$/, "")
-    .replace(/^@/, "")
-    .toUpperCase();
-}
-
-function updateRepresentativeCard() {
-  const rep = representatives[elements.brandSelect.value] || { name: "", slackId: "" };
-  elements.representativeName.textContent = rep.name || "Not configured";
-  if (rep.slackId) {
-    elements.representativeMention.textContent = `Greeting will mention <@${rep.slackId}>`;
-  } else if (rep.name) {
-    elements.representativeMention.textContent = `Greeting will address ${rep.name}`;
-  } else {
-    elements.representativeMention.textContent = "The default greeting will use “bhai”";
+  state.representatives = next;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    showToast("Representatives saved.");
+  } catch (error) {
+    showToast("Saved for this visit only. This browser is blocking storage.");
   }
+  el.settingsDialog.close();
+  updateRepresentativeCard();
+  refreshOutput();
 }
 
-async function pasteImageFromClipboard() {
+/* ---------- getting the meeting in: image or text ---------- */
+
+async function pasteFromClipboard() {
   if (!navigator.clipboard?.read) {
-    showToast("Clipboard image access is unavailable. Press Ctrl+V instead.");
+    showToast("This browser can't read the clipboard from a button. Press Ctrl + V instead.");
     return;
   }
   try {
@@ -246,103 +288,144 @@ async function pasteImageFromClipboard() {
       const imageType = item.types.find((type) => type.startsWith("image/"));
       if (!imageType) continue;
       const blob = await item.getType(imageType);
-      await handleImageFile(new File([blob], `pasted-meeting-${Date.now()}.png`, { type: imageType }));
+      handleImageFile(new File([blob], "Pasted screenshot", { type: imageType }));
       return;
     }
-    showToast("No screenshot image was found in the clipboard.");
+    const textItem = items.find((item) => item.types.includes("text/plain"));
+    if (textItem) {
+      readDetailsFromText(await (await textItem.getType("text/plain")).text(), "paste");
+      return;
+    }
+    showToast("The clipboard has no screenshot or text. Copy one and try again.");
   } catch (error) {
     console.warn(error);
-    showToast("Clipboard access was blocked. Press Ctrl+V instead.");
+    showToast("Clipboard access was blocked. Press Ctrl + V instead.");
   }
 }
 
 function handlePasteEvent(event) {
-  const item = [...(event.clipboardData?.items || [])].find((candidate) => candidate.type.startsWith("image/"));
-  if (!item) return;
+  if (el.settingsDialog.open) return;
+  const data = event.clipboardData;
+  const imageItem = [...(data?.items || [])].find((candidate) => candidate.type.startsWith("image/"));
+  if (imageItem) {
+    const file = imageItem.getAsFile();
+    if (!file) return;
+    event.preventDefault();
+    handleImageFile(new File([file], "Pasted screenshot", { type: file.type }));
+    return;
+  }
+  // Text pasted outside a form field is treated as meeting text to read.
+  if (event.target.closest?.("input, textarea, select, [contenteditable]")) return;
+  const text = data?.getData("text/plain") || "";
+  if (!text.trim()) return;
   event.preventDefault();
-  const file = item.getAsFile();
-  if (file) handleImageFile(new File([file], `pasted-meeting-${Date.now()}.png`, { type: file.type }));
+  readDetailsFromText(text, "paste");
 }
 
-async function handleImageFile(file) {
+function handleImageFile(file) {
   if (!file.type.startsWith("image/")) {
-    showToast("Please select a valid screenshot image.");
+    showToast("That file is not an image. Use a PNG, JPG or WebP screenshot.");
     return;
   }
-  if (file.size > 15 * 1024 * 1024) {
-    showToast("The screenshot is larger than 15 MB. Please use a smaller image.");
+  if (file.size > MAX_IMAGE_BYTES) {
+    showToast("That screenshot is over 15 MB. Crop it to the meeting details and try again.");
     return;
   }
-
-  currentImage = file;
+  state.image = file;
   const objectUrl = URL.createObjectURL(file);
-  elements.previewImage.onload = () => URL.revokeObjectURL(objectUrl);
-  elements.previewImage.src = objectUrl;
-  elements.imageName.textContent = file.name || "Pasted screenshot";
-  elements.emptyDropState.hidden = true;
-  elements.imageState.hidden = false;
-  elements.clearImageBtn.disabled = false;
-  elements.runOcrBtn.disabled = false;
-  await runOcr();
+  el.previewImage.onload = () => URL.revokeObjectURL(objectUrl);
+  el.previewImage.src = objectUrl;
+  el.imageName.textContent = file.name || "Pasted screenshot";
+  el.emptyDropState.hidden = true;
+  el.imageState.hidden = false;
+  el.clearImageBtn.hidden = false;
+  el.runOcrBtn.disabled = false;
+  runOcr();
 }
+
+function clearImage() {
+  state.image = null;
+  el.previewImage.removeAttribute("src");
+  el.emptyDropState.hidden = false;
+  el.imageState.hidden = true;
+  el.clearImageBtn.hidden = true;
+  el.runOcrBtn.disabled = true;
+  el.ocrStatus.hidden = true;
+  el.extractionResult.hidden = true;
+  el.extractedText.value = "";
+}
+
+/* ---------- OCR ---------- */
 
 async function runOcr() {
-  if (!currentImage || isOcrRunning) return;
+  if (!state.image) return;
+  if (state.ocrRunning) {
+    // A new screenshot arrived mid-scan; scan it as soon as the current run ends.
+    state.ocrQueued = true;
+    return;
+  }
 
-  isOcrRunning = true;
-  elements.runOcrBtn.disabled = true;
-  elements.ocrStatus.hidden = false;
-  elements.extractionResult.hidden = true;
+  const image = state.image;
+  state.ocrRunning = true;
+  el.runOcrBtn.disabled = true;
+  el.ocrStatus.hidden = false;
+  el.ocrStatus.classList.remove("failed");
+  el.ocrHint.hidden = Boolean(ocr.paddle || ocr.worker);
+  el.extractionResult.hidden = true;
   setOcrProgress(0, "Preparing screenshot…");
 
   try {
-    const prepared = await prepareOcrImages(currentImage);
+    const prepared = await prepareOcrImages(image);
     const candidates = [];
-    let engineLabel = "Enhanced OCR";
 
     try {
-      setOcrProgress(8, "Loading enhanced OCR model…");
+      setOcrProgress(8, "Loading the text reader…");
       const paddleText = await recognizeWithPaddleOcr(prepared.color);
-      if (paddleText) candidates.push({ engine: "PaddleOCR", text: paddleText });
+      if (paddleText) candidates.push(paddleText);
     } catch (error) {
-      paddleOcrUnavailable = true;
-      console.warn("Enhanced PaddleOCR was unavailable; using fallback OCR.", error);
-      engineLabel = "Fallback OCR";
+      ocr.paddleUnavailable = true;
+      console.warn("PaddleOCR was unavailable; using Tesseract instead.", error);
     }
 
-    const paddleBest = selectBestOcrCandidate(candidates);
-    if (!paddleBest || scoreOcrText(paddleBest.text) < 15) {
-      setOcrProgress(58, paddleBest ? "Checking missed details…" : "Reading screenshot with fallback OCR…");
-      const fallbackTexts = await recognizeWithTesseract(prepared);
-      fallbackTexts.forEach((text, index) => {
-        if (text) candidates.push({ engine: index === 0 ? "Tesseract enhanced" : "Tesseract high contrast", text });
-      });
-      if (paddleBest && fallbackTexts.some(Boolean)) engineLabel = "Enhanced OCR + verification";
+    const paddleBest = selectBestOcrText(candidates);
+    if (!paddleBest || core.scoreOcrText(paddleBest, BRANDS) < GOOD_OCR_SCORE) {
+      setOcrProgress(58, paddleBest ? "Double-checking missed details…" : "Reading the screenshot…");
+      candidates.push(...(await recognizeWithTesseract(prepared)).filter(Boolean));
     }
 
-    const best = selectBestOcrCandidate(candidates);
-    if (!best?.text) throw new Error("No text was recognized.");
+    const best = selectBestOcrText(candidates);
+    if (!best) throw new Error("No text was recognised.");
+    if (state.image !== image) return; // replaced or removed while scanning
 
-    const text = cleanText(buildOcrConsensusText(candidates, best));
-    elements.extractedText.value = text;
-    setOcrProgress(100, `${engineLabel} complete`);
-    extractAndApplyDetails(text, false);
-    elements.extractionResult.dataset.engine = best.engine;
-    window.setTimeout(() => { elements.ocrStatus.hidden = true; }, 1400);
+    const text = core.cleanText(buildOcrConsensusText(candidates, best));
+    el.extractedText.value = text;
+    setOcrProgress(100, "Screenshot read");
+    readDetailsFromText(text, "screenshot");
+    window.setTimeout(() => {
+      if (!state.ocrRunning) el.ocrStatus.hidden = true;
+    }, 1200);
   } catch (error) {
     console.error(error);
-    setOcrProgress(0, "OCR failed");
-    showToast("OCR could not read the screenshot. Try a tighter crop or paste the text manually.");
+    if (state.image === image) {
+      el.ocrStatus.classList.add("failed");
+      el.ocrHint.hidden = true;
+      setOcrProgress(0, "Couldn't read this screenshot. Try a tighter crop, or paste the meeting text below.");
+      el.textDetails.open = true;
+    }
   } finally {
-    isOcrRunning = false;
-    elements.runOcrBtn.disabled = !currentImage;
+    state.ocrRunning = false;
+    el.runOcrBtn.disabled = !state.image;
+    if (state.ocrQueued) {
+      state.ocrQueued = false;
+      runOcr();
+    }
   }
 }
 
 async function recognizeWithPaddleOcr(imageCanvas) {
-  const ocr = await getPaddleOcr();
-  setOcrProgress(28, "Detecting text regions…");
-  const [result] = await ocr.predict(imageCanvas, {
+  const engine = await getPaddleOcr();
+  setOcrProgress(28, "Finding the text…");
+  const [result] = await engine.predict(imageCanvas, {
     textDetLimitSideLen: 1920,
     textDetLimitType: "max",
     textDetMaxSideLimit: 3200,
@@ -351,122 +434,145 @@ async function recognizeWithPaddleOcr(imageCanvas) {
     textDetUnclipRatio: 1.6,
     textRecScoreThresh: 0.25
   });
-  setOcrProgress(54, "Recognising meeting details…");
-  return formatPaddleOcrItems(result?.items || []);
+  setOcrProgress(54, "Reading the meeting details…");
+  return core.formatPaddleOcrItems(result?.items || []);
 }
 
-async function getPaddleOcr() {
-  if (paddleOcr) return paddleOcr;
-  if (paddleOcrUnavailable) throw new Error("PaddleOCR is disabled for this session.");
-  if (!paddleOcrPromise) {
-    paddleOcrPromise = import(PADDLE_OCR_MODULE_URL)
+function getPaddleOcr() {
+  if (ocr.paddle) return Promise.resolve(ocr.paddle);
+  if (ocr.paddleUnavailable) return Promise.reject(new Error("PaddleOCR is disabled for this session."));
+  if (!ocr.paddlePromise) {
+    ocr.paddlePromise = import(PADDLE_OCR_MODULE_URL)
       .then(({ PaddleOCR }) => PaddleOCR.create({
         lang: "en",
         ocrVersion: "PP-OCRv6",
-        ortOptions: {
-          backend: "wasm",
-          wasmPaths: ONNX_WASM_PATH,
-          numThreads: 1,
-          simd: true
-        }
+        ortOptions: { backend: "wasm", wasmPaths: ONNX_WASM_PATH, numThreads: 1, simd: true }
       }))
       .then((instance) => {
-        paddleOcr = instance;
+        ocr.paddle = instance;
         return instance;
       })
       .catch((error) => {
-        paddleOcrPromise = null;
+        ocr.paddlePromise = null;
         throw error;
       });
   }
-  return paddleOcrPromise;
-}
-
-function formatPaddleOcrItems(items) {
-  const positioned = items
-    .filter((item) => cleanText(item?.text || "") && Number(item?.score ?? 1) >= 0.22)
-    .map((item) => {
-      const points = Array.isArray(item.poly) ? item.poly : [];
-      const xs = points.map((point) => Number(point?.[0])).filter(Number.isFinite);
-      const ys = points.map((point) => Number(point?.[1])).filter(Number.isFinite);
-      const x = xs.length ? Math.min(...xs) : 0;
-      const y = ys.length ? Math.min(...ys) : 0;
-      const height = ys.length ? Math.max(8, Math.max(...ys) - Math.min(...ys)) : 16;
-      return { text: cleanText(item.text), x, y, centerY: y + height / 2, height };
-    })
-    .sort((a, b) => a.centerY - b.centerY || a.x - b.x);
-
-  const rows = [];
-  positioned.forEach((item) => {
-    const row = rows.find((candidate) => Math.abs(candidate.centerY - item.centerY) <= Math.max(candidate.height, item.height) * 0.55);
-    if (row) {
-      row.items.push(item);
-      row.centerY = (row.centerY * (row.items.length - 1) + item.centerY) / row.items.length;
-      row.height = Math.max(row.height, item.height);
-    } else {
-      rows.push({ centerY: item.centerY, height: item.height, items: [item] });
-    }
-  });
-
-  return rows
-    .sort((a, b) => a.centerY - b.centerY)
-    .map((row) => row.items.sort((a, b) => a.x - b.x).map((item) => item.text).join(" "))
-    .join("\n");
+  return ocr.paddlePromise;
 }
 
 async function recognizeWithTesseract(prepared) {
-  if (!window.Tesseract) throw new Error("Tesseract fallback could not load.");
-  const worker = await getOcrWorker();
+  const worker = await getTesseractWorker();
   const outputs = [];
 
-  await worker.setParameters({
-    tessedit_pageseg_mode: "3",
-    preserve_interword_spaces: "1",
-    user_defined_dpi: "300"
-  });
-  const enhanced = await worker.recognize(prepared.enhanced);
-  outputs.push(cleanText(enhanced.data.text || ""));
+  await worker.setParameters({ tessedit_pageseg_mode: "3", preserve_interword_spaces: "1", user_defined_dpi: "300" });
+  outputs.push(core.cleanText((await worker.recognize(prepared.enhanced)).data.text));
 
-  if (scoreOcrText(outputs[0]) < 15) {
-    setOcrProgress(82, "Running high-contrast verification…");
-    await worker.setParameters({
-      tessedit_pageseg_mode: "6",
-      preserve_interword_spaces: "1",
-      user_defined_dpi: "300"
-    });
-    const highContrast = await worker.recognize(prepared.binary);
-    outputs.push(cleanText(highContrast.data.text || ""));
+  if (core.scoreOcrText(outputs[0], BRANDS) < GOOD_OCR_SCORE) {
+    setOcrProgress(82, "Trying a high-contrast pass…");
+    await worker.setParameters({ tessedit_pageseg_mode: "6", preserve_interword_spaces: "1", user_defined_dpi: "300" });
+    outputs.push(core.cleanText((await worker.recognize(prepared.binary)).data.text));
   }
   return outputs;
+}
+
+/* Tesseract is only downloaded if PaddleOCR fails or misses details. */
+function loadTesseractScript() {
+  if (window.Tesseract) return Promise.resolve();
+  if (!ocr.tesseractScript) {
+    ocr.tesseractScript = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = TESSERACT_URL;
+      script.onload = resolve;
+      script.onerror = () => {
+        ocr.tesseractScript = null;
+        script.remove();
+        reject(new Error("Tesseract could not be downloaded."));
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return ocr.tesseractScript;
+}
+
+async function getTesseractWorker() {
+  if (ocr.worker) return ocr.worker;
+  await loadTesseractScript();
+  if (!ocr.workerPromise) {
+    const labels = {
+      "loading tesseract core": "Loading the backup text reader…",
+      "initializing tesseract": "Starting the backup text reader…",
+      "loading language traineddata": "Loading English recognition data…",
+      "initializing api": "Almost ready…",
+      "recognizing text": "Reading the screenshot…"
+    };
+    ocr.workerPromise = window.Tesseract.createWorker("eng", 1, {
+      logger: (message) => {
+        if (typeof message.progress !== "number" || !state.ocrRunning) return;
+        setOcrProgress(58 + Math.round(message.progress * 34), labels[message.status] || "Reading the screenshot…");
+      }
+    }).then((worker) => {
+      ocr.worker = worker;
+      return worker;
+    }).catch((error) => {
+      ocr.workerPromise = null;
+      throw error;
+    });
+  }
+  return ocr.workerPromise;
+}
+
+function selectBestOcrText(texts) {
+  return texts
+    .filter((text) => core.cleanText(text))
+    .sort((a, b) => core.scoreOcrText(b, BRANDS) - core.scoreOcrText(a, BRANDS) || b.length - a.length)[0] || "";
+}
+
+/* Start from the best reading and append any detail only another pass caught. */
+function buildOcrConsensusText(texts, bestText) {
+  const baseText = core.cleanText(bestText);
+  const base = core.extractReminderDetails(baseText, BRANDS);
+  const consensus = { ...base };
+  [...texts]
+    .sort((a, b) => core.scoreOcrText(b, BRANDS) - core.scoreOcrText(a, BRANDS))
+    .forEach((text) => {
+      const details = core.extractReminderDetails(text, BRANDS);
+      Object.keys(consensus).forEach((key) => {
+        if (!consensus[key] && details[key]) consensus[key] = details[key];
+      });
+    });
+
+  const extra = [];
+  if (!base.brand && consensus.brand) extra.push(`Brand: ${consensus.brand}`);
+  if (!base.partnerBrand && consensus.partnerBrand) extra.push(`Meeting with: ${consensus.partnerBrand}`);
+  if (!base.email && consensus.email) extra.push(consensus.email);
+  if (!base.meetingLink && consensus.meetingLink) extra.push("Meeting link", consensus.meetingLink);
+  if ((!base.date || !base.time || !base.timezone) && consensus.date && consensus.time) {
+    const range = [consensus.time, consensus.endTime].filter(Boolean).map(core.formatTimeForMessage).join(" ~ ");
+    extra.push("When", `${consensus.date} - ${range} (${core.timezoneLabel(consensus.timezone || core.TARGET_ZONE)})`);
+  }
+  return extra.length ? `${baseText}\n\nAlso found on a second pass\n${extra.join("\n")}` : baseText;
 }
 
 async function prepareOcrImages(file) {
   const source = await loadImageSource(file);
   const width = source.width || source.naturalWidth;
   const height = source.height || source.naturalHeight;
-  const desiredScale = Math.min(3, Math.max(1, 2200 / Math.max(1, width)));
-  const maximumScale = 4200 / Math.max(1, width, height);
-  const scale = Math.min(desiredScale, maximumScale);
-  const outputWidth = Math.max(1, Math.round(width * scale));
-  const outputHeight = Math.max(1, Math.round(height * scale));
+  // Upscale small screenshots for sharper text, but cap the canvas so phones don't run out of memory.
+  const scale = Math.min(3, Math.max(1, 2200 / Math.max(1, width)), 4200 / Math.max(1, width, height));
 
   const color = document.createElement("canvas");
-  color.width = outputWidth;
-  color.height = outputHeight;
-  const colorContext = color.getContext("2d", { willReadFrequently: true });
-  colorContext.imageSmoothingEnabled = true;
-  colorContext.imageSmoothingQuality = "high";
-  colorContext.drawImage(source, 0, 0, outputWidth, outputHeight);
-
-  const enhanced = cloneCanvas(color);
-  enhanceCanvasForText(enhanced, false);
-  const binary = cloneCanvas(color);
-  enhanceCanvasForText(binary, true);
+  color.width = Math.max(1, Math.round(width * scale));
+  color.height = Math.max(1, Math.round(height * scale));
+  const context = color.getContext("2d", { willReadFrequently: true });
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(source, 0, 0, color.width, color.height);
   if (typeof source.close === "function") source.close();
-  return { color, enhanced, binary };
+
+  return { color, enhanced: toTextCanvas(color, false), binary: toTextCanvas(color, true) };
 }
 
-async function loadImageSource(file) {
+function loadImageSource(file) {
   if (typeof createImageBitmap === "function") return createImageBitmap(file);
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -483,21 +589,18 @@ async function loadImageSource(file) {
   });
 }
 
-function cloneCanvas(source) {
+/* Greyscale copy with stretched contrast, or pure black and white (Otsu) when `binary` is set. */
+function toTextCanvas(source, binary) {
   const canvas = document.createElement("canvas");
   canvas.width = source.width;
   canvas.height = source.height;
-  canvas.getContext("2d").drawImage(source, 0, 0);
-  return canvas;
-}
-
-function enhanceCanvasForText(canvas, makeBinary) {
   const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.drawImage(source, 0, 0);
+
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = image.data;
   const luminance = new Uint8Array(pixels.length / 4);
   const histogram = new Uint32Array(256);
-
   for (let index = 0, pixel = 0; index < pixels.length; index += 4, pixel += 1) {
     const gray = Math.round(0.299 * pixels[index] + 0.587 * pixels[index + 1] + 0.114 * pixels[index + 2]);
     luminance[pixel] = gray;
@@ -505,20 +608,21 @@ function enhanceCanvasForText(canvas, makeBinary) {
   }
 
   const low = histogramPercentile(histogram, luminance.length, 0.02);
-  const high = histogramPercentile(histogram, luminance.length, 0.98);
-  const threshold = makeBinary ? otsuThreshold(histogram, luminance.length) : 0;
-  const range = Math.max(24, high - low);
+  const range = Math.max(24, histogramPercentile(histogram, luminance.length, 0.98) - low);
+  const threshold = binary ? otsuThreshold(histogram, luminance.length) : 0;
+  const clamp = (value) => Math.max(0, Math.min(255, Math.round(value)));
 
   for (let index = 0, pixel = 0; index < pixels.length; index += 4, pixel += 1) {
-    let value = Math.max(0, Math.min(255, Math.round(((luminance[pixel] - low) * 255) / range)));
-    if (makeBinary) value = luminance[pixel] > threshold ? 255 : 0;
-    else value = Math.max(0, Math.min(255, Math.round((value - 128) * 1.18 + 128)));
+    const value = binary
+      ? (luminance[pixel] > threshold ? 255 : 0)
+      : clamp((clamp(((luminance[pixel] - low) * 255) / range) - 128) * 1.18 + 128);
     pixels[index] = value;
     pixels[index + 1] = value;
     pixels[index + 2] = value;
     pixels[index + 3] = 255;
   }
   context.putImageData(image, 0, 0);
+  return canvas;
 }
 
 function histogramPercentile(histogram, total, percentile) {
@@ -544,9 +648,8 @@ function otsuThreshold(histogram, total) {
     const foregroundWeight = total - backgroundWeight;
     if (!foregroundWeight) break;
     backgroundSum += value * histogram[value];
-    const backgroundMean = backgroundSum / backgroundWeight;
-    const foregroundMean = (sum - backgroundSum) / foregroundWeight;
-    const variance = backgroundWeight * foregroundWeight * (backgroundMean - foregroundMean) ** 2;
+    const difference = backgroundSum / backgroundWeight - (sum - backgroundSum) / foregroundWeight;
+    const variance = backgroundWeight * foregroundWeight * difference ** 2;
     if (variance > maximumVariance) {
       maximumVariance = variance;
       threshold = value;
@@ -555,665 +658,262 @@ function otsuThreshold(histogram, total) {
   return threshold;
 }
 
-function scoreOcrText(text) {
-  if (!text) return 0;
-  const details = extractReminderDetails(text);
-  let score = 0;
-  if (details.meetingLink) score += /meet\.google\.com\/[a-z0-9]{3,}(?:-[a-z0-9]{2,})?/i.test(details.meetingLink) ? 7 : 5;
-  if (details.date) score += 4;
-  if (details.time) score += 4;
-  if (details.endTime) score += 2;
-  if (details.timezone) score += 2;
-  if (details.email) score += 1;
-  if (details.brand) score += 1;
-  if (details.partnerBrand) score += 1;
-  score += Math.min(2, Math.floor(cleanText(text).length / 150));
-  return score;
-}
-
-function selectBestOcrCandidate(candidates) {
-  return [...candidates]
-    .filter((candidate) => cleanText(candidate?.text || ""))
-    .sort((a, b) => scoreOcrText(b.text) - scoreOcrText(a.text) || b.text.length - a.text.length)[0] || null;
-}
-
-function buildOcrConsensusText(candidates, bestCandidate) {
-  const baseText = cleanText(bestCandidate?.text || "");
-  const baseDetails = extractReminderDetails(baseText);
-  const consensus = { ...baseDetails };
-  const sorted = [...candidates].sort((a, b) => scoreOcrText(b.text) - scoreOcrText(a.text));
-
-  sorted.forEach((candidate) => {
-    const details = extractReminderDetails(candidate.text);
-    Object.keys(consensus).forEach((key) => {
-      if (!consensus[key] && details[key]) consensus[key] = details[key];
-    });
-  });
-
-  const supplemental = [];
-  if (!baseDetails.brand && consensus.brand) supplemental.push(`Brand: ${consensus.brand}`);
-  if (!baseDetails.partnerBrand && consensus.partnerBrand) supplemental.push(`Meeting with: ${consensus.partnerBrand}`);
-  if (!baseDetails.email && consensus.email) supplemental.push(consensus.email);
-  if (!baseDetails.meetingLink && consensus.meetingLink) supplemental.push("Meeting link", consensus.meetingLink);
-  if ((!baseDetails.date || !baseDetails.time || !baseDetails.timezone) && consensus.date && consensus.time) {
-    const timezoneLabel = consensus.timezone === "Europe/London" ? "United Kingdom Time" : "Bangladesh Standard Time";
-    supplemental.push("When", `${consensus.date} - ${formatTimeForOcrConsensus(consensus.time)}${consensus.endTime ? ` ~ ${formatTimeForOcrConsensus(consensus.endTime)}` : ""} (${timezoneLabel})`);
-  }
-  return supplemental.length ? `${baseText}\n\nOCR verification\n${supplemental.join("\n")}` : baseText;
-}
-
-function formatTimeForOcrConsensus(value) {
-  const match = /^(\d{2}):(\d{2})$/.exec(value || "");
-  if (!match) return value;
-  const hour = Number(match[1]);
-  return `${hour % 12 || 12}:${match[2]}${hour >= 12 ? "pm" : "am"}`;
-}
-
-async function getOcrWorker() {
-  if (ocrWorker) return ocrWorker;
-  if (!ocrWorkerPromise) {
-    ocrWorkerPromise = Tesseract.createWorker("eng", 1, {
-      logger: (message) => {
-        if (typeof message.progress !== "number" || !isOcrRunning) return;
-        const labels = {
-          "loading tesseract core": "Loading fallback OCR engine…",
-          "initializing tesseract": "Initialising fallback OCR…",
-          "loading language traineddata": "Loading English recognition data…",
-          "initializing api": "Preparing fallback recognition…",
-          "recognizing text": "Verifying screenshot text…"
-        };
-        const scaledProgress = 58 + Math.round(message.progress * 34);
-        setOcrProgress(scaledProgress, labels[message.status] || "Verifying screenshot…");
-      }
-    }).then((worker) => {
-      ocrWorker = worker;
-      return worker;
-    }).catch((error) => {
-      ocrWorkerPromise = null;
-      throw error;
-    });
-  }
-  return ocrWorkerPromise;
-}
-
 function setOcrProgress(percent, label) {
   const safe = Math.max(0, Math.min(100, Number(percent) || 0));
-  elements.ocrStatusText.textContent = label;
-  elements.ocrPercent.textContent = `${safe}%`;
-  elements.progressBar.style.width = `${safe}%`;
+  el.ocrStatusText.textContent = label;
+  el.ocrPercent.textContent = safe ? `${safe}%` : "";
+  el.progressBar.style.width = `${safe}%`;
 }
 
-function cleanText(value) {
-  return String(value || "")
-    .replace(/\r/g, "")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .split("\n")
-    .map((line) => line.trim())
-    .join("\n")
-    .trim();
-}
+/* ---------- details ---------- */
 
-function extractAndApplyDetails(text, manualRun) {
-  const source = cleanText(text);
+function readDetailsFromText(text, origin) {
+  const source = core.cleanText(text);
   if (!source) {
-    showToast("Add OCR text before fetching meeting details.");
+    showToast("There's no text to read yet. Paste the invite or email first.");
+    el.textDetails.open = true;
+    el.extractedText.focus();
     return;
   }
-
-  const details = extractReminderDetails(source);
-  const found = [];
-
-  if (details.brand) {
-    elements.brandSelect.value = details.brand;
-    updateRepresentativeCard();
-    found.push("brand");
-  }
-  if (details.partnerBrand) {
-    elements.partnerBrandInput.value = details.partnerBrand;
-    found.push("partner brand");
-  }
-  if (details.email) {
-    elements.emailInput.value = details.email;
-    found.push("email");
-  }
-  if (details.date) {
-    elements.sourceDate.value = details.date;
-    found.push("date");
-  }
-  if (details.time) {
-    elements.sourceTime.value = details.time;
-    found.push("start time");
-  }
-  if (details.endTime) {
-    elements.sourceEndTime.value = details.endTime;
-    found.push("end time");
-  }
-  if (details.timezone) {
-    elements.sourceTimezone.value = details.timezone;
-    found.push(details.timezone === "Europe/London" ? "UK time zone" : "Bangladesh time zone");
-  }
-  if (details.meetingLink) {
-    elements.meetingLinkInput.value = details.meetingLink;
-    found.push("meeting link");
+  if (origin === "paste") {
+    el.extractedText.value = source;
+    el.textDetails.open = true;
   }
 
-  updateConversionPreview();
-  const missing = [
-    [details.email, "email"], [details.date, "date"], [details.time, "start time"], [details.meetingLink, "meeting link"]
-  ].filter(([value]) => !value).map(([, label]) => label);
-
-  elements.extractionResult.hidden = false;
+  const found = applyDetails(core.extractReminderDetails(source, BRANDS));
+  const from = origin === "screenshot" ? "the screenshot" : "the text";
+  el.extractionResult.hidden = false;
   if (found.length) {
-    elements.extractionResult.className = "extraction-result success";
-    elements.extractionResult.innerHTML = `<strong>Fetched:</strong> ${escapeHtml(found.join(", "))}${missing.length ? `<br><small>Please review or add: ${escapeHtml(missing.join(", "))}.</small>` : ""}`;
-    showToast(manualRun ? "Meeting details fetched from the text." : "Screenshot processed. Review the fetched details.");
+    el.extractionResult.innerHTML = `<p>Read from ${from}. Check each one before you copy.</p>
+      <div class="chip-row">${found.map((key) => `<span class="chip">${escapeHtml(FIELD_LABELS[key])}</span>`).join("")}</div>`;
   } else {
-    elements.extractionResult.className = "extraction-result warning";
-    elements.extractionResult.innerHTML = "<strong>No structured details were recognised.</strong><br><small>Edit the OCR text or complete the fields manually.</small>";
-    showToast("No meeting details were recognised. Please complete the fields manually.");
+    el.extractionResult.innerHTML = `<p>No meeting details were recognised in ${from}. Fill in the details by hand, or edit the text and read it again.</p>`;
+    el.textDetails.open = true;
   }
+  refreshOutput();
 }
 
-function extractReminderDetails(text) {
-  const timeRange = extractTimeRange(text);
-  return {
-    brand: extractBrand(text),
-    partnerBrand: extractPartnerBrand(text),
-    email: extractEmail(text),
-    date: extractDate(text),
-    time: timeRange.startTime,
-    endTime: timeRange.endTime,
-    timezone: extractTimezone(text),
-    meetingLink: extractMeetingLink(text)
-  };
-}
-
-function extractBrand(text) {
-  const compact = normalizeSearchText(text);
-  return BRANDS.find((brand) => compact.includes(normalizeSearchText(brand))) || "";
-}
-
-function extractPartnerBrand(text) {
-  const lines = String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  for (const line of lines) {
-    const match = line.match(/^(?:meeting\s+with(?:\s+partner\s+brand)?|partner\s+brand|partner|organisation|organization)\s*[:\-]\s*(.+)$/i);
-    if (!match) continue;
-    const value = cleanText(match[1]).replace(/[|]+$/g, "").trim();
-    if (value && !/@|https?:\/\//i.test(value) && value.length <= 120) return value;
-  }
-  return "";
-}
-
-function extractEmail(text) {
-  const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return match ? match[0].replace(/[),.;]+$/, "") : "";
-}
-
-function extractTimezone(text) {
-  const value = text.toLowerCase();
-  if (/united\s*kingdom\s*time|uk\s*time|british\s*summer\s*time|greenwich\s*mean\s*time|europe\s*\/\s*london|london\s*time/.test(value)) {
-    return "Europe/London";
-  }
-  if (/bangladesh\s*standard\s*time|bangladesh\s*time|asia\s*\/\s*dhaka|dhaka\s*time|\bbdt\b/.test(value)) {
-    return "Asia/Dhaka";
-  }
-  if (/\b(?:gmt|bst)\b/.test(value) && /\b(?:uk|british|london|kingdom)\b/.test(value)) {
-    return "Europe/London";
-  }
-  return "";
-}
-
-function extractMeetingLink(text) {
-  const repaired = repairOcrUrlText(text);
-  const lines = repaired.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-
-  for (let index = 0; index < lines.length; index += 1) {
-    if (!/^meeting\s*link\s*[:\-]?$/i.test(lines[index])) continue;
-    const nextLine = lines[index + 1] || "";
-    const labelledCandidate = extractMeetingUrlCandidate(nextLine);
-    if (labelledCandidate) return labelledCandidate;
-  }
-
-  const direct = repaired.match(/https?:\/\/[^\s<>"'`]+/gi) || [];
-  const www = repaired.match(/\bwww\.[^\s<>"'`]+/gi) || [];
-  const bareDomains = repaired.match(/\b(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|(?:[a-z0-9-]+\.)?join\.gong\.io|gong\.io|(?:[a-z0-9-]+\.)?webex\.com|gotomeet\.me|whereby\.com)(?:\/[^\s<>"'`]*)?/gi) || [];
-  const candidates = [...direct, ...www.map((url) => `https://${url}`), ...bareDomains.map((url) => `https://${url}`)]
-    .map(cleanUrlCandidate)
-    .filter(Boolean);
-
-  const unique = [...new Set(candidates)];
-  if (!unique.length) return "";
-  const meetingDomains = /(zoom\.us|meet\.google\.com|teams\.microsoft\.com|join\.gong\.io|gong\.io|webex\.com|gotomeet\.me|whereby\.com)/i;
-  return unique.find((url) => meetingDomains.test(url)) || unique.sort((a, b) => b.length - a.length)[0];
-}
-
-function extractMeetingUrlCandidate(value) {
-  const match = String(value || "").match(/(?:https?:\/\/)?(?:www\.)?(?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|(?:[a-z0-9-]+\.)?join\.gong\.io|gong\.io|(?:[a-z0-9-]+\.)?webex\.com|gotomeet\.me|whereby\.com)(?:\/[^\s<>"'`]*)?/i);
-  return match ? cleanUrlCandidate(match[0]) : "";
-}
-
-function repairOcrUrlText(text) {
-  let value = String(text || "")
-    .replace(/h\s*t\s*t\s*p\s*s?\s*:\s*\/\s*\//gi, (match) => match.toLowerCase().includes("s") ? "https://" : "http://")
-    .replace(/w\s*w\s*w\s*\.\s*/gi, "www.")
-    .replace(/\bmeet\s*[.,]?\s*goog(?:l|1|i)e\s*[.,]?\s*co(?:m|rn)\b/gi, "meet.google.com")
-    .replace(/\bmeet[.,]\s*google[.,]\s*com\b/gi, "meet.google.com")
-    .replace(/\bmeet\.goog(?:1|i)e\.co(?:rn|m)\b/gi, "meet.google.com")
-    .replace(/\bmeet\.google\.com\s*[\\|]\s*/gi, "meet.google.com/")
-    .replace(/\bmeet\.google\.com\s*\/\s*/gi, "meet.google.com/");
-
-  value = value.replace(/(meet\.google\.com\/)([a-z0-9]{2,4})\s*[-–—~_]\s*([a-z0-9]{2,5})\s*[-–—~_]\s*([a-z0-9]{2,4})/gi, "$1$2-$3-$4");
-  value = value.replace(/(https?:\/\/[^\s\n]+)\n([A-Za-z0-9_%#?=&./-]{3,})/g, (full, base, continuation) =>
-    /[-/?=&_%#]/.test(continuation) ? `${base}${continuation}` : full);
-  value = value.replace(/((?:meet\.google\.com|zoom\.us|teams\.microsoft\.com|(?:[a-z0-9-]+\.)?join\.gong\.io|gong\.io|(?:[a-z0-9-]+\.)?webex\.com|gotomeet\.me|whereby\.com)\/?[^\s\n]*)\n([A-Za-z0-9_%#?=&./-]{3,})/gi, (full, base, continuation) =>
-    /[-/?=&_%#]/.test(continuation) ? `${base}${continuation}` : full);
-  return value;
-}
-
-function cleanUrlCandidate(value) {
-  let url = String(value || "").trim().replace(/[),.;\]}]+$/, "");
-  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
-  try {
-    return new URL(url).href;
-  } catch (error) {
-    return "";
-  }
-}
-
-function extractDate(text) {
-  const normalized = String(text || "").replace(/[|]/g, " ");
-  let match = normalized.match(/\b(20\d{2})[-/.](0?[1-9]|1[0-2])[-/.](0?[1-9]|[12]\d|3[01])\b/);
-  if (match) return toDateInput(Number(match[1]), Number(match[2]), Number(match[3]));
-
-  match = normalized.match(/\b(0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?[\s\-/.]+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[,\s\-/.]+(20\d{2})\b/i);
-  if (match) return toDateInput(Number(match[3]), MONTH_LOOKUP[match[2].toLowerCase()], Number(match[1]));
-
-  match = normalized.match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)[\s\-/.]+(0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?[,]?[\s\-/.]+(20\d{2})\b/i);
-  if (match) return toDateInput(Number(match[3]), MONTH_LOOKUP[match[1].toLowerCase()], Number(match[2]));
-
-  match = normalized.match(/\b(0?[1-9]|[12]\d|3[01])[-/.](0?[1-9]|1[0-2])[-/.](20\d{2})\b/);
-  if (match) return toDateInput(Number(match[3]), Number(match[2]), Number(match[1]));
-
-  return "";
-}
-
-function extractTimeRange(text) {
-  const normalized = normalizeTimeText(text);
-  const lines = normalized.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  let candidate = "";
-
-  const whenIndex = lines.findIndex((line) => /^when\s*[:\-]?$/i.test(line));
-  if (whenIndex >= 0) candidate = lines.slice(whenIndex + 1, whenIndex + 4).join(" ");
-  if (!candidate) {
-    candidate = lines.find((line) => /(?:~|–|—|\bto\b)/i.test(line) && containsTimeToken(line)) || "";
-  }
-  if (!candidate) candidate = normalized;
-
-  const tokens = candidate.match(/\b(?:1[0-2]|0?[1-9])(?:\s*:\s*[0-5]\d)?\s*(?:AM|PM)\b|\b(?:[01]?\d|2[0-3])\s*:\s*[0-5]\d\b/gi) || [];
-  const parsed = tokens.map(parseTimeToken).filter(Boolean);
-  return {
-    startTime: parsed[0] || "",
-    endTime: parsed[1] || ""
-  };
-}
-
-function normalizeTimeText(text) {
-  return String(text || "")
-    .replace(/\b([0-2]?\d)\s*[.·]\s*([0-5]\d)\b/g, "$1:$2")
-    .replace(/\bA\s*\.?\s*M\.?\b/gi, "AM")
-    .replace(/\bP\s*\.?\s*M\.?\b/gi, "PM");
-}
-
-function containsTimeToken(value) {
-  return /\b(?:1[0-2]|0?[1-9])(?:\s*:\s*[0-5]\d)?\s*(?:AM|PM)\b|\b(?:[01]?\d|2[0-3])\s*:\s*[0-5]\d\b/i.test(value);
-}
-
-function parseTimeToken(token) {
-  const value = String(token || "").trim().toUpperCase().replace(/\s+/g, "");
-  let match = /^(1[0-2]|0?[1-9])(?::([0-5]\d))?(AM|PM)$/.exec(value);
-  if (match) return twelveToTwentyFour(Number(match[1]), Number(match[2] || 0), match[3]);
-  match = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(value);
-  if (match) return `${pad(Number(match[1]))}:${pad(Number(match[2]))}`;
-  return "";
-}
-
-function extractTime(text) {
-  return extractTimeRange(text).startTime;
-}
-
-function twelveToTwentyFour(hours, minutes, period) {
-  let value = hours % 12;
-  if (String(period).toUpperCase() === "PM") value += 12;
-  return `${pad(value)}:${pad(minutes)}`;
-}
-
-function toDateInput(year, month, day) {
-  const date = new Date(Date.UTC(year, month - 1, day));
-  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return "";
-  return `${year}-${pad(month)}-${pad(day)}`;
-}
-
-function updateConversionPreview() {
-  const converted = getBangladeshMeetingDateTime();
-  if (!converted) {
-    elements.convertedDateTime.textContent = "Add the meeting date and start time";
-    elements.conversionNote.textContent = "The final message always uses Bangladesh Standard Time.";
-    elements.conversionCard.classList.remove("converted");
-    return;
-  }
-
-  elements.convertedDateTime.textContent = formatConvertedRange(converted);
-  if (elements.sourceTimezone.value === "Europe/London") {
-    elements.conversionNote.textContent = `Converted automatically from United Kingdom Time (${converted.ukZoneName}) to Bangladesh Standard Time.`;
-    elements.conversionCard.classList.add("converted");
-  } else {
-    elements.conversionNote.textContent = "No conversion needed; the screenshot time is already Bangladesh Standard Time.";
-    elements.conversionCard.classList.remove("converted");
-  }
-}
-
-function getBangladeshMeetingDateTime() {
-  const dateValue = elements.sourceDate.value;
-  const timeValue = elements.sourceTime.value;
-  const endTimeValue = elements.sourceEndTime.value;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue) || !/^\d{2}:\d{2}$/.test(timeValue)) return null;
-
-  const endSourceDate = endTimeValue && endTimeValue <= timeValue ? addDaysToDateInput(dateValue, 1) : dateValue;
-  if (elements.sourceTimezone.value === "Asia/Dhaka") {
-    return {
-      date: dateValue,
-      time: timeValue,
-      endDate: endTimeValue ? endSourceDate : "",
-      endTime: endTimeValue,
-      ukZoneName: ""
-    };
-  }
-
-  const instant = zonedLocalToUtc(dateValue, timeValue, "Europe/London");
-  if (!instant || Number.isNaN(instant.getTime())) return null;
-  const dhaka = formatDateTimeInZone(instant, "Asia/Dhaka");
-  let endDhaka = null;
-  if (endTimeValue) {
-    const endInstant = zonedLocalToUtc(endSourceDate, endTimeValue, "Europe/London");
-    if (endInstant && !Number.isNaN(endInstant.getTime())) endDhaka = formatDateTimeInZone(endInstant, "Asia/Dhaka");
-  }
-  return {
-    date: dhaka.date,
-    time: dhaka.time,
-    endDate: endDhaka?.date || "",
-    endTime: endDhaka?.time || "",
-    ukZoneName: getTimeZoneName(instant, "Europe/London")
-  };
-}
-
-function addDaysToDateInput(dateValue, days) {
-  const [year, month, day] = dateValue.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day + days));
-  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
-}
-
-function formatConvertedRange(converted) {
-  const start = `${formatDateForMessage(converted.date)} at ${formatTimeForMessage(converted.time)}`;
-  if (!converted.endTime) return start;
-  if (converted.endDate === converted.date) return `${start} – ${formatTimeForMessage(converted.endTime)}`;
-  return `${start} – ${formatDateForMessage(converted.endDate)} at ${formatTimeForMessage(converted.endTime)}`;
-}
-
-function zonedLocalToUtc(dateValue, timeValue, timeZone) {
-  const [year, month, day] = dateValue.split("-").map(Number);
-  const [hour, minute] = timeValue.split(":").map(Number);
-  const base = Date.UTC(year, month - 1, day, hour, minute, 0);
-  let guess = base;
-  for (let i = 0; i < 3; i += 1) {
-    guess = base - getTimeZoneOffsetMs(new Date(guess), timeZone);
-  }
-  return new Date(guess);
-}
-
-function getTimeZoneOffsetMs(date, timeZone) {
-  const parts = getZonedParts(date, timeZone);
-  const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
-  return asUtc - date.getTime();
-}
-
-function getZonedParts(date, timeZone) {
-  const result = {};
-  new Intl.DateTimeFormat("en-GB", {
-    timeZone,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hourCycle: "h23"
-  }).formatToParts(date).forEach((part) => {
-    if (part.type !== "literal") result[part.type] = Number(part.value);
+/* Fill the form from a details object; returns the keys that were applied. */
+function applyDetails(details) {
+  const applied = [];
+  Object.entries(FIELD_IDS).forEach(([key, id]) => {
+    const value = details?.[key];
+    if (!value) return;
+    const field = el[id];
+    if (field.tagName === "SELECT" && ![...field.options].some((option) => option.value === value)) return;
+    field.value = value;
+    field.classList.add("autofilled");
+    applied.push(key);
   });
-  return result;
+  if (applied.includes("brand")) updateRepresentativeCard();
+  return applied;
 }
 
-function formatDateTimeInZone(date, timeZone) {
-  const parts = getZonedParts(date, timeZone);
+/* The extension hands a meeting over as index.html#prefill=… */
+function applyPrefillFromHash() {
+  const details = core.decodePrefill(window.location.hash);
+  if (!details) return false;
+  applyDetails(details);
+  history.replaceState(null, "", window.location.pathname + window.location.search);
+  showToast("Meeting details loaded from the extension.");
+  return true;
+}
+
+function readForm() {
   return {
-    date: `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`,
-    time: `${pad(parts.hour)}:${pad(parts.minute)}`
+    brand: el.brandSelect.value,
+    partnerBrand: el.partnerBrandInput.value,
+    email: el.emailInput.value.trim(),
+    date: el.sourceDate.value,
+    time: el.sourceTime.value,
+    endTime: el.sourceEndTime.value,
+    timezone: el.sourceTimezone.value,
+    meetingLink: el.meetingLinkInput.value.trim(),
+    note: el.additionalNote.value
   };
 }
 
-function getTimeZoneName(date, timeZone) {
-  const part = new Intl.DateTimeFormat("en-GB", {
-    timeZone,
-    timeZoneName: "short",
-    hour: "2-digit"
-  }).formatToParts(date).find((item) => item.type === "timeZoneName");
-  return part?.value || "UK time";
+function focusField(key) {
+  const field = el[FIELD_IDS[key]];
+  if (!field) return;
+  field.scrollIntoView({ block: "center", behavior: "smooth" });
+  field.focus({ preventScroll: true });
 }
 
-function generateReminder() {
-  const brand = elements.brandSelect.value;
-  const partnerBrand = cleanText(elements.partnerBrandInput.value);
-  const email = elements.emailInput.value.trim();
-  const meetingLink = elements.meetingLinkInput.value.trim();
-  const converted = getBangladeshMeetingDateTime();
+/* ---------- live output ---------- */
 
-  const required = [
-    [email, elements.emailInput, "Add the email address."],
-    [elements.sourceDate.value, elements.sourceDate, "Add the meeting date."],
-    [elements.sourceTime.value, elements.sourceTime, "Add the meeting time."],
-    [meetingLink, elements.meetingLinkInput, "Add the meeting link."]
-  ];
-  const missing = required.find(([value]) => !value);
-  if (missing) {
-    missing[1].focus();
-    showToast(missing[2]);
-    return;
+function refreshOutput() {
+  const form = readForm();
+  const converted = core.convertToDhaka(form);
+  const missing = core.findMissingFields(form);
+  renderTicket(form, converted);
+  renderFieldHints(form);
+
+  const ready = !missing.length && converted;
+  state.lastGenerated = ready ? core.buildReminderMessage({ ...form, rep: currentRepresentative(), converted }) : "";
+  if (!state.outputEdited) el.outputMessage.value = state.lastGenerated;
+
+  const hasMessage = Boolean(el.outputMessage.value.trim());
+  el.copyBtn.disabled = !hasMessage;
+  el.shareSlackBtn.disabled = !hasMessage;
+  if (!hasMessage) el.shareFeedback.textContent = "";
+
+  el.outputStatus.classList.toggle("is-ready", Boolean(ready) && !state.outputEdited);
+  let status;
+  if (state.outputEdited) {
+    status = 'You edited the message, so changes to the details no longer update it. <button class="text-btn" type="button" data-action="rebuild">Rebuild from details</button>';
+  } else if (ready) {
+    status = "Ready to copy. It updates as you change the details.";
+  } else {
+    status = `Still needed to write the reminder:
+      <div class="chip-row">${missing.map((key) => `<button class="chip missing" type="button" data-focus="${key}">${escapeHtml(FIELD_LABELS[key])}</button>`).join("")}</div>`;
   }
+  // Only touch the DOM when the status changes: re-rendering mid-click would
+  // swallow a press on the buttons inside it.
+  if (status !== state.statusHtml) {
+    state.statusHtml = status;
+    el.outputStatus.innerHTML = status;
+  }
+}
+
+function renderTicket(form, converted) {
+  el.conversionCard.classList.toggle("is-empty", !converted);
+  el.conversionCard.classList.toggle("same-zone", Boolean(converted) && !converted.wasConverted);
   if (!converted) {
-    showToast("The meeting date or time is invalid.");
+    el.ticketSourceLabel.textContent = "On the screenshot";
+    el.ticketSourceTime.textContent = "--:--";
+    el.ticketSourceDate.textContent = "Add a date and start time";
+    el.convertedTime.textContent = "--:--";
+    el.convertedDate.textContent = " ";
+    el.conversionNote.textContent = "The reminder always uses Bangladesh Standard Time.";
     return;
   }
 
-  const rep = representatives[brand] || { name: "", slackId: "" };
-  const greeting = rep.slackId
-    ? `Assalamu Alaikum <@${rep.slackId}>,`
-    : rep.name
-      ? `Assalamu Alaikum ${rep.name} bhai,`
-      : "Assalamu Alaikum bhai,";
+  const describe = (date, endTime, endDate) => {
+    const day = `${core.formatWeekday(date)}, ${core.formatDateForMessage(date)}`;
+    if (!endTime) return day;
+    const until = `until ${core.formatTimeForMessage(endTime)}`;
+    return endDate && endDate !== date ? `${day}, ${until} next day` : `${day}, ${until}`;
+  };
+  const sourceEndDate = form.endTime && form.endTime <= form.time ? core.addDaysToDateInput(form.date, 1) : form.date;
 
-  const lines = [
-    greeting,
-    "",
-    "This is an automated reminder.",
-    "",
-    `Brand: ${brand}`,
-    ...(partnerBrand ? [`Meeting with: ${partnerBrand}`] : []),
-    email,
-    "",
-    `Date: ${formatDateForMessage(converted.date)}`,
-    `Time: ${formatReminderTimeRange(converted)} (Bangladesh Standard Time)`,
-    `Meeting Link: ${meetingLink}`
-  ];
+  el.ticketSourceLabel.textContent = converted.sourceZoneName
+    ? `${core.timezoneLabel(converted.sourceZone)} (${converted.sourceZoneName})`
+    : core.timezoneLabel(converted.sourceZone);
+  el.ticketSourceTime.textContent = core.formatTimeForMessage(form.time);
+  el.ticketSourceDate.textContent = describe(form.date, form.endTime, sourceEndDate);
+  el.convertedTime.textContent = core.formatTimeForMessage(converted.time);
+  el.convertedDate.textContent = describe(converted.date, converted.endTime, converted.endDate);
 
-  const note = cleanText(elements.additionalNote.value);
-  if (note) lines.push("", note);
-
-  elements.outputMessage.value = lines.join("\n");
-  updateCopyState();
-  elements.copyFeedback.textContent = elements.sourceTimezone.value === "Europe/London"
-    ? "Reminder generated with UK time converted to Bangladesh time."
-    : "Reminder generated and ready to copy.";
+  if (!converted.wasConverted) el.conversionNote.textContent = "Already in Bangladesh time, so nothing to convert.";
+  else if (converted.date !== form.date) el.conversionNote.textContent = "Note the date: in Bangladesh this meeting falls on a different day.";
+  else el.conversionNote.textContent = "Converted to Bangladesh Standard Time, with daylight saving handled for that date.";
 }
 
-function formatReminderTimeRange(converted) {
-  const start = formatTimeForMessage(converted.time);
-  if (!converted.endTime) return start;
-  const end = formatTimeForMessage(converted.endTime);
-  return converted.endDate && converted.endDate !== converted.date
-    ? `${start} - ${end} (ends ${formatDateForMessage(converted.endDate)})`
-    : `${start} - ${end}`;
+function renderFieldHints(form) {
+  const hints = {
+    emailInput: form.email && !el.emailInput.validity.valid ? "This doesn't look like a complete email address." : "",
+    meetingLinkInput: form.meetingLink && !core.cleanUrlCandidate(form.meetingLink) ? "This doesn't look like a link. It should start with https://" : ""
+  };
+  Object.entries(hints).forEach(([id, message]) => {
+    const hint = document.querySelector(`[data-error-for="${id}"]`);
+    hint.textContent = message;
+    hint.hidden = !message;
+    el[id].classList.toggle("needs-attention", Boolean(message));
+  });
 }
 
-function formatDateForMessage(value) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
-  if (!match) return value;
-  return `${match[3]}-${MONTH_NAMES[Number(match[2]) - 1]}-${match[1]}`;
-}
-
-function formatTimeForMessage(value) {
-  const match = /^(\d{2}):(\d{2})$/.exec(value || "");
-  if (!match) return value;
-  const hour24 = Number(match[1]);
-  return `${hour24 % 12 || 12}:${match[2]} ${hour24 >= 12 ? "PM" : "AM"}`;
-}
-
-async function copyOutput() {
-  const text = elements.outputMessage.value.trim();
-  if (!text) return;
-  await copyTextToClipboard(text);
-  elements.copyFeedback.textContent = "Copied to clipboard.";
-  showToast("Reminder copied.");
-}
+/* ---------- copy and share ---------- */
 
 async function copyTextToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
+    return true;
   } catch (error) {
-    elements.outputMessage.focus();
-    elements.outputMessage.select();
-    document.execCommand("copy");
+    // Older browsers and non-HTTPS pages: fall back to selecting the text.
+    el.outputMessage.focus();
+    el.outputMessage.select();
+    return document.execCommand("copy");
+  }
+}
+
+async function copyOutput() {
+  const text = el.outputMessage.value.trim();
+  if (!text) return;
+  if (await copyTextToClipboard(text)) {
+    showToast("Message copied.");
+    flashButton(el.copyBtn, "Copied");
+  } else {
+    showToast("Couldn't copy automatically. The message is selected, so press Ctrl + C.");
   }
 }
 
 function isLikelyMobileDevice() {
-  if (navigator.userAgentData && typeof navigator.userAgentData.mobile === "boolean") {
-    return navigator.userAgentData.mobile;
-  }
+  if (typeof navigator.userAgentData?.mobile === "boolean") return navigator.userAgentData.mobile;
   return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "");
 }
 
-function openSlackDesktopApp() {
-  const link = document.createElement("a");
-  link.href = "slack://open";
-  link.setAttribute("aria-hidden", "true");
-  link.style.display = "none";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-}
-
-async function shareToSlack() {
-  const text = elements.outputMessage.value.trim();
-  if (!text) {
-    showToast("Generate the reminder message first.");
-    return;
-  }
-
-  const shareData = { title: "Meeting reminder", text };
-  const mobileNativeShare = isLikelyMobileDevice()
-    && typeof navigator.clipboard.writeText === "function"
-    && (!navigator.canShare || navigator.canShare(shareData));
-
-  if (mobileNativeShare) {
-    try {
-      await navigator.clipboard.writeText(shareData);
-      elements.shareFeedback.textContent = "Share menu opened. Select Slack and choose the conversation.";
-      showToast("Choose Slack from the share menu.");
-      return;
-    } catch (error) {
-      if (error?.name === "AbortError") {
-        elements.shareFeedback.textContent = "Sharing was cancelled.";
-        return;
-      }
-      console.warn("Native sharing failed; opening Slack directly.", error);
-    }
-  }
-
-  await copyTextToClipboard(text);
-  elements.shareFeedback.innerHTML = 'Copied to clipboard. Slack Desktop is opening; paste the reminder into the required channel or chat. If it does not open, <a href="https://app.slack.com/client" target="_blank" rel="noopener noreferrer">open Slack Web</a>.';
-  showToast("Copied. Paste the reminder in Slack.");
-  openSlackDesktopApp();
+function canUseShareSheet() {
+  return isLikelyMobileDevice() && typeof navigator.share === "function";
 }
 
 function updateShareButtonLabel() {
-  const mobileNativeShare = isLikelyMobileDevice() && typeof navigator.clipboard.writeText === "function";
-  elements.shareSlackBtn.textContent = mobileNativeShare ? "Share to Slack" : "Copy & open Slack";
-  elements.shareSlackBtn.title = mobileNativeShare
-    ? "Open your device share menu and choose Slack"
-    : "Copy the reminder and open the Slack desktop app";
+  el.shareSlackBtn.textContent = canUseShareSheet() ? "Share to Slack" : "Copy and open Slack";
 }
 
-function updateCopyState() {
-  const empty = !elements.outputMessage.value.trim();
-  elements.copyBtn.disabled = empty;
-  elements.shareSlackBtn.disabled = empty;
-  if (empty) {
-    elements.copyFeedback.textContent = "";
-    elements.shareFeedback.textContent = "";
+async function shareToSlack() {
+  const text = el.outputMessage.value.trim();
+  if (!text) return;
+
+  if (canUseShareSheet()) {
+    try {
+      await navigator.share({ text });
+      el.shareFeedback.textContent = "Pick Slack in the share menu, then choose the conversation.";
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      console.warn("The share menu failed; opening Slack directly.", error);
+    }
   }
+
+  const copied = await copyTextToClipboard(text);
+  el.shareFeedback.innerHTML = `${copied ? "Message copied. " : ""}Slack is opening, so paste the message into the right channel. If nothing opens, <a href="https://app.slack.com/client" target="_blank" rel="noopener noreferrer">use Slack in the browser</a>.`;
+  showToast(copied ? "Message copied. Paste it in Slack." : "Opening Slack…");
+  const link = Object.assign(document.createElement("a"), { href: "slack://open" });
+  link.click();
 }
 
-function clearImage() {
-  currentImage = null;
-  elements.previewImage.removeAttribute("src");
-  elements.emptyDropState.hidden = false;
-  elements.imageState.hidden = true;
-  elements.clearImageBtn.disabled = true;
-  elements.runOcrBtn.disabled = true;
-  elements.ocrStatus.hidden = true;
-  elements.extractionResult.hidden = true;
-  elements.extractedText.value = "";
-}
+/* ---------- reset and small utilities ---------- */
 
 function resetForm() {
   clearImage();
-  elements.brandSelect.selectedIndex = 0;
-  elements.partnerBrandInput.value = "";
-  elements.emailInput.value = "";
-  elements.sourceDate.value = "";
-  elements.sourceTime.value = "";
-  elements.sourceEndTime.value = "";
-  elements.sourceTimezone.value = "Asia/Dhaka";
-  elements.meetingLinkInput.value = "";
-  elements.additionalNote.value = "";
-  elements.outputMessage.value = "";
+  Object.values(FIELD_IDS).forEach((id) => {
+    const field = el[id];
+    if (field.tagName === "SELECT") field.selectedIndex = 0;
+    else field.value = "";
+    field.classList.remove("autofilled");
+  });
+  el.textDetails.open = false;
+  state.outputEdited = false;
+  el.shareFeedback.textContent = "";
   updateRepresentativeCard();
-  updateConversionPreview();
-  updateCopyState();
-  showToast("Reminder form reset. Representative settings were kept.");
+  refreshOutput();
+  showToast("Cleared. Your representatives are still saved.");
 }
 
-function normalizeSearchText(value) {
-  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
-function pad(value) {
-  return String(value).padStart(2, "0");
+function flashButton(button, label) {
+  const original = button.dataset.label || button.textContent;
+  button.dataset.label = original;
+  button.textContent = label;
+  window.clearTimeout(button.flashTimer);
+  button.flashTimer = window.setTimeout(() => { button.textContent = original; }, 1500);
 }
 
 function showToast(message) {
-  elements.toast.textContent = message;
-  elements.toast.classList.add("visible");
-  window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 3000);
+  el.toast.textContent = message;
+  el.toast.classList.add("visible");
+  window.clearTimeout(state.toastTimer);
+  state.toastTimer = window.setTimeout(() => el.toast.classList.remove("visible"), 3200);
 }
 
 function escapeHtml(value) {
@@ -1224,19 +924,3 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
-
-// Exposed for lightweight automated tests without affecting normal use.
-window.ReminderGeneratorTest = {
-  extractReminderDetails,
-  extractPartnerBrand,
-  extractDate,
-  extractTime,
-  extractTimeRange,
-  extractTimezone,
-  extractMeetingLink,
-  zonedLocalToUtc,
-  formatDateTimeInZone,
-  repairOcrUrlText,
-  scoreOcrText,
-  formatPaddleOcrItems
-};

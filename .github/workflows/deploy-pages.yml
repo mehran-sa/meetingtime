@@ -23,6 +23,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Run tests
+        run: node --test tests/core.test.js
+      - name: Package the Chrome extension
+        run: |
+          node scripts/sync-extension.js
+          (cd extension && zip -qr ../meetingtime-extension.zip .)
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload site

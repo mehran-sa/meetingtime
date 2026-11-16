@@ -3,7 +3,7 @@
  * Add the representative name and Slack member ID for each brand before deployment.
  * A user can still override these values from Representative Settings in the browser.
  */
-window.BRAND_CONFIG = [
+globalThis.BRAND_CONFIG = [
   { brand: "Alpha Academy", representativeName: "", slackId: "" },
   { brand: "John Academy", representativeName: "", slackId: "" },
   { brand: "Janets", representativeName: "", slackId: "" },

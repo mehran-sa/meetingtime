@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meeting Tracker settings</title>
+  <link rel="icon" href="icons/icon-32.png" />
+  <link rel="stylesheet" href="popup.css" />
+  <script src="brand-config.js" defer></script>
+  <script src="core.js" defer></script>
+  <script src="store.js" defer></script>
+  <script src="options.js" defer></script>
+</head>
+<body class="options">
+  <form id="optionsForm" class="options-shell">
+    <header>
+      <img src="icons/icon.svg" alt="" width="40" height="40" />
+      <h1>Meeting Tracker settings</h1>
+    </header>
+
+    <section class="card">
+      <h2>Reminders</h2>
+      <p>A desktop notification before each tracked meeting, with a button to join.</p>
+      <div class="setting-row">
+        <label for="notify">Remind me before meetings</label>
+        <input id="notify" type="checkbox" />
+      </div>
+      <div class="setting-row">
+        <label for="leadMinutes">How long before</label>
+        <select id="leadMinutes">
+          <option value="5">5 minutes</option>
+          <option value="10">10 minutes</option>
+          <option value="15">15 minutes</option>
+          <option value="30">30 minutes</option>
+          <option value="60">1 hour</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label for="keepPastDays">Keep past meetings for</label>
+        <select id="keepPastDays">
+          <option value="3">3 days</option>
+          <option value="7">7 days</option>
+          <option value="14">14 days</option>
+          <option value="30">30 days</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Full reminder tool</h2>
+      <p>The web address of the Slack Reminder Generator. With it set, the popup can hand a meeting over to the full tool.</p>
+      <div class="setting-row wide">
+        <label for="webAppUrl">Web address <small>Leave empty to hide the button</small></label>
+        <input id="webAppUrl" type="url" placeholder="https://…" />
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Brand representatives</h2>
+      <p>Who each brand's reminder greets. Add a Slack member ID to @mention them; otherwise the name is used.</p>
+      <table class="rep-table">
+        <thead><tr><th scope="col">Brand</th><th scope="col">Representative name</th><th scope="col">Slack member ID</th></tr></thead>
+        <tbody id="repRows"></tbody>
+      </table>
+    </section>
+
+    <div class="save-bar">
+      <button class="btn btn-primary" type="submit">Save settings</button>
+      <span id="saveStatus" role="status" aria-live="polite"></span>
+    </div>
+  </form>
+</body>
+</html>
